@@ -138,7 +138,7 @@ async def test_prepay_full_cycle(h):
     c = h.chat(CLIENT, "Иван")
     await _book(c)
     assert "осталась предоплата 300₽" in c.last_text() and "2202" in c.last_text()
-    assert not any("Новая запись" in t for t in h.notified(MASTER1))  # мастеру — после оплаты
+    assert any("ждёт предоплату" in t for t in h.notified(MASTER1))  # мастер видит бронь сразу
     await c.send_photo("CHECK1")
     assert "Чек отправлен" in c.last_text()
     check = [m for m in h.backend_sent if m.get("chat_id") == ADMIN and m["method"] == "sendPhoto"][-1]
@@ -150,7 +150,7 @@ async def test_prepay_full_cycle(h):
     await a.press(pay_ok, caption="💳 Чек о предоплате 300₽")
     assert "Оплата подтверждена" in a.last_text()
     assert any("Предоплата получена" in t for t in h.notified(CLIENT))
-    assert any("Новая запись" in t for t in h.notified(MASTER1))
+    assert any("Предоплата получена" in t for t in h.notified(MASTER1))
     async with SessionLocal() as s:
         assert (await s.scalar(select(Booking))).status == "confirmed"
     await a.press(pay_ok, caption="💳 Чек")
@@ -268,3 +268,64 @@ async def test_list_pagination_and_back_from_client_card(h):
     assert "Запись №" in mst.last_text()
     await mst.press(mst.button("К списку записей"))
     assert "Раньше" in " ".join(t for t, _ in mst.buttons())
+
+
+async def test_master_cabinet_full_cycle(h):
+    """Админ приглашает мастера → мастер открывает ссылку → кабинет → получает запись → отмечает выходной."""
+    a = h.chat(ADMIN, "Админ")
+    async with SessionLocal() as s:
+        timur = await s.scalar(select(Master).where(Master.name == "Тимур"))
+    await a.press(f"a:mst:{timur.id}")
+    assert "не подключён к боту" in a.last_text()
+    await a.press(a.button("Пригласить мастера"))
+    assert "Мастер ещё не подключён" in a.last_text()
+    code = a.last_text().split("start=")[1].split()[0]
+
+    t = h.chat(2002, "Тимур")
+    await t.send(f"/start {code}")
+    txt = t.last_text()
+    assert "Готово, Тимур" in txt and "мастер «Парик»" in txt and "Что можно сделать" in txt
+    assert any("Тимур</b> подключился" in m for m in h.notified(ADMIN))
+    assert [x for x, _ in t.buttons()][:4] == ["📋 Мои записи", "📅 По дням", "🌴 Выходной / отгул", "🕒 Мой график"]
+
+    # клиент записывается к Тимуру — мастер получает уведомление
+    c = h.chat(CLIENT, "Иван")
+    await _book(c, master="Тимур")
+    assert any("Новая запись" in m for m in h.notified(2002))
+
+    await t.send("/start")
+    assert "всего впереди: <b>1</b>" in t.last_text()
+    await t.press("me:hours")
+    assert "Пн: 10:00–20:00" in t.last_text() and "Стрижка" in t.last_text()
+    await t.press("me:off")
+    await t.press("me:offpick:0")
+    await t.press(f"me:offadd:{tomorrow()}")
+    assert "уже есть записи (1)" in t.last_text()
+    assert any("Тимур</b> отметил выходной" in m and "записей: 1" in m for m in h.notified(ADMIN))
+    await t.press(t.button("Иван"))
+    await t.press(t.button("Отменить запись"))
+    await t.press(t.button("Да, отменить"))
+    assert any("отменена салоном" in m for m in h.notified(CLIENT))
+    await t.press("me:off")
+    assert "❌" in " ".join(x for x, _ in t.buttons())
+    await t.press(f"me:offdel:{tomorrow()}")
+    assert "выходных не отмечено" in t.last_text()
+    await t.press("me:client")
+    assert "📅 Записаться" in [x for x, _ in t.buttons()]
+    await t.press("me")
+    assert "Кабинет" in t.last_text() or "мастер «Парик»" in t.last_text()
+
+
+async def test_admin_who_is_also_master(h):
+    a = h.chat(ADMIN, "Админ")
+    async with SessionLocal() as s:
+        alim = await s.scalar(select(Master).where(Master.name == "Алим"))
+        alim.telegram_chat_id = None
+        await s.commit()
+    await a.press(f"a:minv:{alim.id}")
+    code = a.last_text().split("start=")[1].split()[0]
+    await a.send(f"/start {code}")
+    labels = [x for x, _ in a.buttons()]
+    assert "⚙️ Админка" in labels and "💇 Кабинет мастера" in labels
+    await a.press("me")
+    assert "Алим" in a.last_text() and "⚙️ Админка" in [x for x, _ in a.buttons()]

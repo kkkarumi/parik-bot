@@ -120,7 +120,7 @@ async def test_prepay_approve_flow(api, salon, sent):
                     json={"prepay_amount": 300, "payment_details": "Карта 2202 0000"})
     b = (await book(api, salon)).json()
     assert b["status"] == "pending_payment" and b["prepay_amount"] == 300 and "2202" in b["payment_details"]
-    assert to(sent, ADMIN) and not to(sent, M1)  # мастеру — только после оплаты
+    assert to(sent, ADMIN) and "ждёт предоплату" in to(sent, M1)[0]["text"]  # мастер знает сразу
     mine = (await api.get("/bookings", params={"telegram_id": 501})).json()
     assert mine[0]["status"] == "pending_payment"
     # слот уже занят, пока ждём оплату
@@ -137,7 +137,7 @@ async def test_prepay_approve_flow(api, salon, sent):
     r = (await api.post(f"/admin/payments/{pid}/approve", params={"telegram_id": ADMIN})).json()
     assert r == {"ok": True, "status": "confirmed"}
     assert "Предоплата получена" in to(sent, 501)[0]["text"]
-    assert "Новая запись" in to(sent, M1)[0]["text"]
+    assert "Предоплата получена" in to(sent, M1)[0]["text"]
     # повторное нажатие не ломает
     assert (await api.post(f"/admin/payments/{pid}/approve", params={"telegram_id": ADMIN})).json()["ok"] is False
 
@@ -206,3 +206,40 @@ async def test_upcoming_list(api, salon):
     await api.post(f"/staff/bookings/{r[0]['id']}/cancel", params={"telegram_id": ADMIN})
     assert len((await api.get("/staff/upcoming", params={"telegram_id": ADMIN})).json()) == 1
     assert (await api.get("/staff/upcoming", params={"telegram_id": STRANGER})).status_code == 403
+
+
+async def test_master_cabinet_and_own_timeoff(api, salon, sent):
+    await book(api, salon)
+    me = (await api.get("/staff/me", params={"telegram_id": M1})).json()
+    assert me["name"] == "Алим" and me["upcoming"] == 1 and me["services"] == ["Борода", "Стрижка", "Комбо"]
+    assert me["hours"][0]["intervals"] == [{"start": "10:00", "end": "20:00"}]
+    assert (await api.get("/staff/me", params={"telegram_id": ADMIN})).status_code == 403  # админ не мастер
+    d = tomorrow_at(0).date().isoformat()
+    sent.clear()
+    r = (await api.post("/staff/timeoff", params={"telegram_id": M1}, json={"day": d})).json()
+    assert len(r["bookings"]) == 1
+    assert any("отметил выходной" in m["text"] and "записей: 1" in m["text"] for m in to(sent, ADMIN))
+    assert (await api.get("/staff/me", params={"telegram_id": M1})).json()["days_off"] == [d]
+    assert (await api.get("/slots", params={"master_id": salon["m1"], "service_id": salon["cut"], "date": d})).json() == []
+    sent.clear()
+    await api.delete(f"/staff/timeoff/{d}", params={"telegram_id": M1})
+    assert any("снова работает" in m["text"] for m in to(sent, ADMIN))
+    past = (tomorrow_at(0) - timedelta(days=3)).date().isoformat()
+    assert (await api.post("/staff/timeoff", params={"telegram_id": M1}, json={"day": past})).status_code == 422
+
+
+async def test_master_link_notifies_admin(api, salon, sent):
+    inv = (await api.post(f"/admin/masters/{salon['m2']}/invite", params={"telegram_id": ADMIN})).json()["code"]
+    sent.clear()
+    await api.post("/staff/link", json={"code": inv, "telegram_id": 4242})
+    assert any("подключился к боту" in m["text"] for m in to(sent, ADMIN))
+
+
+async def test_master_gets_pending_payment_booking(api, salon, sent):
+    await api.patch("/admin/salon", params={"telegram_id": ADMIN}, json={"prepay_amount": 300, "payment_details": "Карта"})
+    sent.clear()
+    b = (await book(api, salon)).json()
+    assert any("ждёт предоплату" in m["text"] for m in to(sent, M1))
+    sent.clear()
+    await api.post(f"/bookings/{b['id']}/cancel", params={"telegram_id": 501})
+    assert any("Клиент отменил" in m["text"] for m in to(sent, M1))

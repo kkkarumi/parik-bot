@@ -47,14 +47,16 @@ def kb(*rows_) -> Markup:
     return Markup([list(r) for r in rows_ if r])
 
 
-def main_menu(role: str | None = None) -> Markup:
+def main_menu(role: str | None = None, is_master: bool = False) -> Markup:
     r = [[Btn("📅 Записаться", callback_data="menu_book")],
          [Btn("🗂 Мои записи", callback_data="menu_profile"), Btn("💰 Прайс", callback_data="menu_price")],
          [Btn("📸 Наши работы", callback_data="menu_portfolio"), Btn("📞 Контакты", callback_data="menu_contacts")]]
     if role == "admin":
         r.append([Btn("📋 Записи клиентов", callback_data="up:0"), Btn("⚙️ Админка", callback_data="a:menu")])
+        if is_master:
+            r.append([Btn("💇 Кабинет мастера", callback_data="me")])
     elif role == "master":
-        r.append([Btn("📋 Мои записи клиентов", callback_data="up:0")])
+        r.append([Btn("💇 Кабинет мастера", callback_data="me")])
     return Markup(r)
 
 

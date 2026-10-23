@@ -52,16 +52,15 @@ async def to_staff(b: Booking, text: str, *, master: bool = True, admin: bool = 
 
 
 async def announce_new(b: Booking) -> None:
-    if b.status == "pending_payment":
-        await to_staff(b, card(b, f"🕓 <b>Новая запись — ждёт предоплату {b.tenant.prepay_amount}₽</b>"),
-                       master=False)
+    if b.status == "pending_payment":  # время уже занято — мастер должен знать сразу
+        await to_staff(b, card(b, f"🕓 <b>Новая запись — ждёт предоплату {b.tenant.prepay_amount}₽</b>\n"
+                                  "Если чека не будет, бронь снимется сама"))
     else:
         await to_staff(b, card(b, "🔔 <b>Новая запись</b>"))
 
 
 async def cancel(s: AsyncSession, b: Booking, by: str, actor_chat_id: int | None = None) -> None:
     """by: client | staff | system. Уведомляет «другую сторону»."""
-    was_pending = b.status == "pending_payment"
     b.status, b.cancelled_by = "cancelled", by
     for p in (await s.scalars(select(Payment).where(
             Payment.booking_id == b.id, Payment.status.in_(("awaiting", "pending"))))).all():
@@ -69,15 +68,15 @@ async def cancel(s: AsyncSession, b: Booking, by: str, actor_chat_id: int | None
     await s.commit()
 
     if by == "client":
-        await to_staff(b, card(b, "❌ <b>Клиент отменил запись</b>"), master=not was_pending)
+        await to_staff(b, card(b, "❌ <b>Клиент отменил запись</b>"))
     elif by == "staff":
         await notify.send(b.client.telegram_id,
                           f"⚠️ <b>Ваша запись отменена салоном</b>\n\n💇 {esc(b.master.name)}\n"
                           f"✂️ {esc(b.service.name)}\n📅 {when(b)}\n\n"
                           "Извините за неудобства. Выберите другое время: /start")
-        await to_staff(b, card(b, "🗑 <b>Запись отменена</b>"), master=not was_pending, skip=actor_chat_id)
+        await to_staff(b, card(b, "🗑 <b>Запись отменена</b>"), skip=actor_chat_id)
     else:  # system — не дождались предоплаты
         await notify.send(b.client.telegram_id,
                           f"⌛️ Бронь на {when(b)} снята: не получили подтверждение предоплаты.\n"
                           "Можно записаться заново: /start")
-        await to_staff(b, card(b, "⌛️ <b>Бронь снята — нет предоплаты</b>"), master=False)
+        await to_staff(b, card(b, "⌛️ <b>Бронь снята — нет предоплаты</b>"))

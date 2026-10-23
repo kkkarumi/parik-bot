@@ -272,7 +272,7 @@ async def approve_payment(payment_id: int, t: Tenant = Depends(require_admin),
     await notify.send(b.client.telegram_id,
                       f"✅ <b>Предоплата получена — вы записаны!</b>\n\n💇 {notify.esc(b.master.name)}\n"
                       f"✂️ {notify.esc(b.service.name)}\n📅 {bk.when(b)}\n\nНапомню за 24 часа и за 2 часа до визита.")
-    await bk.to_staff(b, bk.card(b, "🔔 <b>Новая запись (предоплата получена)</b>"), admin=False)
+    await bk.to_staff(b, bk.card(b, "✅ <b>Предоплата получена — запись подтверждена</b>"), admin=False)
     return {"ok": True, "status": b.status}
 
 
@@ -285,6 +285,7 @@ async def reject_payment(payment_id: int, t: Tenant = Depends(require_admin),
         return {"ok": False, "status": b.status, "payment": p.status}
     b.status, b.cancelled_by, p.status = "cancelled", "staff", "rejected"
     await s.commit()
+    await bk.to_staff(b, bk.card(b, "🗑 <b>Бронь снята — оплата не подтверждена</b>"), admin=False)
     await notify.send(b.client.telegram_id,
                       f"❌ Оплата по записи на {bk.when(b)} не подтверждена, бронь снята.\n"
                       f"Если это ошибка — позвоните нам{': ' + notify.esc(t.phone) if t.phone else ''}.")

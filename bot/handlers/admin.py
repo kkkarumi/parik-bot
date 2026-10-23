@@ -171,7 +171,8 @@ async def master(update: Update, context: ContextTypes.DEFAULT_TYPE, mid: str):
     off = await _a(update, "GET", f"/admin/masters/{mid}/timeoff")
     svcs = {s["id"]: s["name"] for s in await _a(update, "GET", "/admin/services")}
     status = "работает" if m["is_active"] else "🙈 скрыт от клиентов"
-    tg = "📱 подключён к боту" if m["linked"] else "не подключён к боту (не получает уведомления)"
+    tg = ("📱 подключён к боту — получает свои записи" if m["linked"]
+          else "⚠️ не подключён к боту — уведомления о записях ему не приходят")
     week = "\n".join(f"{WD[d['weekday']]}: {_hours_line(d)}" for d in hours)
     offs = ", ".join(f"{date.fromisoformat(x):%d.%m}" for x in off[:8]) or "нет"
     sv = ", ".join(svcs[i] for i in m["service_ids"] if i in svcs) or "не выбраны"
@@ -180,7 +181,7 @@ async def master(update: Update, context: ContextTypes.DEFAULT_TYPE, mid: str):
         [Btn("🕒 График", callback_data=f"a:mh:{mid}"), Btn("🌴 Выходные", callback_data=f"a:mo:{mid}")],
         [Btn("✂️ Услуги мастера", callback_data=f"a:ms:{mid}"), Btn("✏️ Имя", callback_data=f"a:mname:{mid}")],
         [Btn("🔓 Отвязать Telegram", callback_data=f"a:munl:{mid}") if m["linked"]
-         else Btn("📱 Подключить к боту", callback_data=f"a:minv:{mid}")],
+         else Btn("📱 Пригласить мастера в бот", callback_data=f"a:minv:{mid}")],
         [Btn("🙈 Скрыть мастера" if m["is_active"] else "👁 Вернуть мастера", callback_data=f"a:mtog:{mid}")],
         [Btn("🔙 К мастерам", callback_data="a:msts")]))
 
@@ -195,8 +196,8 @@ async def master_add_save(update: Update, context: ContextTypes.DEFAULT_TYPE, a:
     m = await _a(update, "POST", "/admin/masters", {"name": update.message.text.strip()[:80]})
     await update.message.reply_text(
         f"✅ Мастер {m['name']} добавлен: делает все услуги, график Пн–Сб 10:00–20:00.\n"
-        "Поправьте график и услуги, если нужно, и подключите мастера к боту — тогда он будет получать "
-        "уведомления о записях.")
+        "Поправьте график и услуги, если нужно, и нажмите «📱 Пригласить мастера в бот» — "
+        "без этого уведомления о записях ему не приходят.")
     await route(update, context, f"a:mst:{m['id']}")
 
 
@@ -222,9 +223,14 @@ async def master_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE, mid:
 async def master_invite(update: Update, context: ContextTypes.DEFAULT_TYPE, mid: str):
     inv = await _a(update, "POST", f"/admin/masters/{mid}/invite")
     link = f"https://t.me/{context.bot.username}?start={inv['code']}"
-    await show(update, "📱 <b>Ссылка для мастера</b>\n\nПерешлите её мастеру. Он откроет — и бот его узнает: "
-                       "будет присылать новые записи, отмены и покажет расписание по /schedule.\n\n"
-                       f"{link}\n\nСсылка одноразовая.", kb([Btn("🔙 К мастеру", callback_data=f"a:mst:{mid}")]))
+    await show(update, "📱 <b>Мастер ещё не подключён.</b> Осталось одно действие с его стороны:\n\n"
+                       "1. Перешлите мастеру эту ссылку.\n"
+                       "2. Он открывает её <b>в своём Telegram</b> и нажимает «Запустить» / Start.\n"
+                       "3. Готово: мне придёт сообщение «Мастер подключился», а ему — кабинет мастера "
+                       "(свои записи, отмена, выходные) и уведомления о каждой записи.\n\n"
+                       f"{link}\n\n"
+                       "Если мастер — это вы сами, откройте ссылку с того аккаунта, на который хотите получать "
+                       "записи. Ссылка одноразовая.", kb([Btn("🔙 К мастеру", callback_data=f"a:mst:{mid}")]))
 
 
 @screen("a:munl")

@@ -191,6 +191,17 @@ class RoleOut(BaseModel):
     name: str | None = None
 
 
+class MasterMe(BaseModel):
+    id: int
+    name: str
+    salon: str
+    hours: list[DayHours]
+    days_off: list[date]
+    services: list[str]
+    upcoming: int
+    today: int
+
+
 class StaffIds(BaseModel):
     admin: int | None
     masters: list[int]

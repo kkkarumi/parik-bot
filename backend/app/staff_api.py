@@ -2,15 +2,17 @@
 from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import bookings as bk
+from . import bookings as bk, notify
 from .db import get_session
 from .deps import Staff, get_staff, get_tenant, resolve_role
-from .models import ACTIVE_STATUSES, Booking, Client, Master, Tenant
-from .slots import day_range
-from .schemas import BookingOut, ClientCard, ClientPatch, LinkIn, RoleOut, StaffIds
+from .models import (ACTIVE_STATUSES, Booking, Client, Master, MasterService, MasterTimeOff, Service, Tenant,
+                     WorkingHours)
+from .notify import esc
+from .schemas import BookingOut, ClientCard, ClientPatch, DayHours, LinkIn, MasterMe, RoleOut, StaffIds, TimeOffIn
+from .slots import day_range, today
 
 router = APIRouter(prefix="/staff")
 
@@ -50,6 +52,9 @@ async def link(data: LinkIn, t: Tenant = Depends(get_tenant), s: AsyncSession = 
                 other.telegram_chat_id = None
             m.telegram_chat_id, m.invite_code = data.telegram_id, None
             await s.commit()
+            if t.admin_chat_id != data.telegram_id:
+                await notify.send(t.admin_chat_id, f"✅ Мастер <b>{esc(m.name)}</b> подключился к боту — "
+                                                   "теперь он получает свои записи и отмены.")
             return RoleOut(role="master", master_id=m.id, name=m.name)
     raise HTTPException(404, "invite not found")
 
@@ -148,3 +153,64 @@ async def patch_client(client_id: int, data: ClientPatch, st: Staff = Depends(ge
         c.is_blocked = data.is_blocked
     await s.commit()
     return await _client_card(s, st, client_id)
+
+
+# ---------- кабинет мастера: свой график и выходные ----------
+def _own_master(st: Staff) -> Master:
+    if not st.master:
+        raise HTTPException(403, "not a master")
+    return st.master
+
+
+@router.get("/me", response_model=MasterMe)
+async def me(st: Staff = Depends(get_staff), s: AsyncSession = Depends(get_session)):
+    m = _own_master(st)
+    rows = (await s.scalars(select(WorkingHours).where(WorkingHours.master_id == m.id)
+                            .order_by(WorkingHours.weekday, WorkingHours.start_time))).all()
+    hours = [DayHours(weekday=wd, intervals=[{"start": f"{r.start_time:%H:%M}", "end": f"{r.end_time:%H:%M}"}
+                                             for r in rows if r.weekday == wd]) for wd in range(7)]
+    off = (await s.scalars(select(MasterTimeOff.day).where(
+        MasterTimeOff.master_id == m.id, MasterTimeOff.day >= today(st.tenant)).order_by(MasterTimeOff.day))).all()
+    services = (await s.scalars(select(Service.name).join(MasterService, MasterService.service_id == Service.id)
+                                .where(MasterService.master_id == m.id, Service.is_active)
+                                .order_by(Service.price))).all()
+    now = datetime.now(timezone.utc)
+    active = select(func.count(Booking.id)).where(Booking.master_id == m.id, Booking.status.in_(ACTIVE_STATUSES))
+    start, end = day_range(st.tenant, today(st.tenant))
+    return MasterMe(id=m.id, name=m.name, salon=st.tenant.name, hours=hours, days_off=list(off),
+                    services=list(services),
+                    upcoming=await s.scalar(active.where(Booking.ends_at > now)),
+                    today=await s.scalar(active.where(Booking.starts_at >= start, Booking.starts_at < end)))
+
+
+@router.post("/timeoff")
+async def add_own_timeoff(data: TimeOffIn, st: Staff = Depends(get_staff), s: AsyncSession = Depends(get_session)) -> dict:
+    """Мастер сам ставит себе выходной. Админ получает уведомление. Возвращает записи на этот день."""
+    m = _own_master(st)
+    if data.day < today(st.tenant):
+        raise HTTPException(422, "day in the past")
+    exists = await s.scalar(select(MasterTimeOff.id).where(MasterTimeOff.master_id == m.id,
+                                                           MasterTimeOff.day == data.day))
+    if not exists:
+        s.add(MasterTimeOff(master_id=m.id, day=data.day))
+        await s.commit()
+    start, end = day_range(st.tenant, data.day)
+    clash = (await s.scalars(select(Booking).where(
+        Booking.master_id == m.id, Booking.status.in_(ACTIVE_STATUSES),
+        Booking.starts_at >= start, Booking.starts_at < end).order_by(Booking.starts_at))).unique().all()
+    if not exists and st.tenant.admin_chat_id != st.telegram_id:
+        extra = f"\n⚠️ На этот день у него записей: {len(clash)}" if clash else ""
+        await notify.send(st.tenant.admin_chat_id,
+                          f"🌴 Мастер <b>{esc(m.name)}</b> отметил выходной: {data.day:%d.%m.%Y}{extra}")
+    return {"ok": True, "bookings": [bk.booking_out(b).model_dump(mode="json") for b in clash]}
+
+
+@router.delete("/timeoff/{day}")
+async def del_own_timeoff(day: date, st: Staff = Depends(get_staff), s: AsyncSession = Depends(get_session)) -> dict:
+    m = _own_master(st)
+    res = await s.execute(delete(MasterTimeOff).where(MasterTimeOff.master_id == m.id, MasterTimeOff.day == day))
+    await s.commit()
+    if res.rowcount and st.tenant.admin_chat_id != st.telegram_id:
+        await notify.send(st.tenant.admin_chat_id,
+                          f"💇 Мастер <b>{esc(m.name)}</b> снова работает {day:%d.%m.%Y} — выходной отменён.")
+    return {"ok": True}

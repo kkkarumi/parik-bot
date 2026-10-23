@@ -6,7 +6,7 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Mes
 
 import config
 from api_client import api
-from handlers import admin, staff  # noqa: F401  (регистрируют экраны в router)
+from handlers import admin, master, staff  # noqa: F401  (регистрируют экраны в router)
 from handlers.booking import booking_handler
 from handlers.client import (cancel_ask, cancel_no, cancel_yes, rate, receipt, reminder_cancel, reminder_ok,
                              show_profile)

@@ -25,25 +25,32 @@ async def set_staff_commands(bot, chat_id: int, role: str):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("ask", None)
     u = update.effective_user
+    intro = ""
     if context.args:  # глубокая ссылка: приглашение админа/мастера
-        await _accept_invite(update, context, context.args[0])
+        intro = await _accept_invite(update, context, context.args[0])
     await api.put("/clients", {"telegram_id": u.id, "username": u.username, "name": u.full_name})
+    r = await get_role(u.id)
+    if r["role"] == "master":  # мастеру — сразу его кабинет
+        from handlers.master import master_home
+        return await master_home(update, context, intro)
+    if intro:  # админ подключил себя же мастером
+        await update.effective_chat.send_message(intro + " Кабинет мастера — кнопка «💇 Кабинет мастера» ниже.")
     salon = await api.get("/salon")
-    role = (await get_role(u.id))["role"]
     text = e(salon.get("welcome_text")) or f"👋 Добро пожаловать в «{e(salon['name'])}»!\nВыберите, что вас интересует 👇"
-    await show(update, text, main_menu(role))
+    await show(update, text, main_menu(r["role"], is_master=bool(r.get("master_id"))))
 
 
-async def _accept_invite(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
+async def _accept_invite(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str) -> str:
+    """Возвращает приветствие для кабинета мастера (или "")."""
     if not (code.startswith("admin_") or code.startswith("m_")):
-        return
+        return ""
     try:
         r = await api.post("/staff/link", {"code": code, "telegram_id": update.effective_user.id})
     except ApiError as err:
         if err.status == 404:
             await update.effective_chat.send_message(
                 "⚠️ Ссылка-приглашение недействительна или уже использована. Попросите новую у администратора.")
-            return
+            return ""
         raise
     await set_staff_commands(context.bot, update.effective_user.id, r["role"])
     if r["role"] == "admin":
@@ -52,7 +59,5 @@ async def _accept_invite(update: Update, context: ContextTypes.DEFAULT_TYPE, cod
             "• /admin — настройки: услуги, цены, мастера, график, предоплата, статистика\n"
             "• /schedule — записи клиентов: отменить, посмотреть клиента\n\nСюда же будут приходить уведомления о новых записях и отменах.",
             parse_mode="HTML")
-    else:
-        await update.effective_chat.send_message(
-            f"💇 Готово, {e(r['name'])}! Теперь сюда будут приходить ваши новые записи и отмены, "
-            "а по /schedule — все ваши записи.", parse_mode="HTML")
+        return ""
+    return f"✅ Готово, {e(r['name'])}! Вы подключены как мастер."

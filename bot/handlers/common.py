@@ -1,9 +1,11 @@
 """Ожидание текстового ввода, роли, обработка ошибок и «протухших» кнопок."""
 import logging
+import time
 from collections.abc import Awaitable, Callable
 
 import httpx
 from telegram import Update
+from telegram.error import Conflict, NetworkError
 from telegram.ext import ContextTypes
 
 from api_client import ApiError, api
@@ -62,8 +64,27 @@ async def stale_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show(update, "Главное меню 👇", main_menu(role["role"]), new=True)
 
 
+CONFLICT_HINT = (
+    "\n⚠️  Этот BOT_TOKEN уже использует ДРУГОЙ запущенный бот — Telegram отдаёт сообщения то ему, то нам.\n"
+    "    Остановите другой экземпляр (старый скрипт в PyCharm/терминале, сервер, другой компьютер).\n"
+    "    Не находится — в @BotFather: /revoke → новый токен в .env → перезапуск.\n")
+_last_warn: dict[str, float] = {}
+
+
+def _warn_once(key: str, message: str, every: float = 300) -> None:
+    """Не засорять лог одинаковыми ошибками: одна строка раз в every секунд."""
+    now = time.monotonic()
+    if now - _last_warn.get(key, -every) >= every:
+        _last_warn[key] = now
+        log.error(message)
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
+    if update is None and isinstance(err, Conflict):
+        return _warn_once("conflict", CONFLICT_HINT)
+    if update is None and isinstance(err, NetworkError):  # пропал интернет — PTB сам переподключится
+        return _warn_once("network", f"Нет связи с Telegram ({err}). Жду и переподключаюсь…", every=60)
     if isinstance(err, (httpx.TransportError, ApiError)) and not (isinstance(err, ApiError) and err.status < 500):
         text = "😔 Сервис записи временно недоступен. Попробуйте через пару минут."
         log.warning("api problem: %r", err)

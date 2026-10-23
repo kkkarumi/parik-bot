@@ -186,3 +186,19 @@ async def test_start_during_phone_step_resets(h):
     assert "Запись прервана." in texts and any("Добро пожаловать" in t for t in texts)
     await c.send("+79281112233")  # это уже не телефон для записи
     assert "Выберите действие" in c.last_text()
+
+
+async def test_conflict_and_network_errors_are_one_line(h, caplog):
+    import logging
+    from types import SimpleNamespace
+    from telegram.error import Conflict, NetworkError
+    from handlers import common
+    common._last_warn.clear()
+    caplog.set_level(logging.ERROR, logger="handlers.common")
+    for _ in range(5):
+        await common.on_error(None, SimpleNamespace(error=Conflict("terminated by other getUpdates request")))
+        await common.on_error(None, SimpleNamespace(error=NetworkError("httpx.ConnectError")))
+    msgs = [r.getMessage() for r in caplog.records]
+    assert len(msgs) == 2  # по одной строке, без трейсбеков
+    assert "другой запущенный бот" in msgs[0].lower() or "ДРУГОЙ" in msgs[0]
+    assert all(r.exc_info is None for r in caplog.records)

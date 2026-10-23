@@ -1,12 +1,14 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-sqlalchemy[asyncio]>=2.0.30
-asyncpg>=0.29
-pydantic-settings>=2.3
-httpx>=0.27
+# Проверено с этими версиями (тесты: SQLite и Postgres 16)
+fastapi==0.161.1
+uvicorn[standard]==0.54.0
+sqlalchemy[asyncio]==2.1.6
+asyncpg==0.32.0
+aiosqlite==0.22.1
+alembic==1.20.1
+pydantic-settings==2.16.1
+httpx==0.28.1
 APScheduler==3.10.4
-loguru>=0.7
-sentry-sdk[fastapi]>=2.0
+loguru==0.7.3
+sentry-sdk[fastapi]==2.73.0
+python-dotenv==1.2.4
 tzdata
-python-dotenv>=1.0
-aiosqlite>=0.20

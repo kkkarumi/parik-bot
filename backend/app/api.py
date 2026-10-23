@@ -1,33 +1,26 @@
+"""Клиентская часть API: каталог, запись, отмена, отзывы, чеки предоплаты."""
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import notify
+from . import bookings as bk, notify
+from .config import settings
 from .db import get_session
 from .deps import get_tenant
-from .models import Booking, Client, Master, MasterService, Review, Service, Tenant
-from .schemas import (BookingIn, BookingOut, ClientIn, ClientOut, MasterOut,
-                      ReviewIn, SalonOut, ServiceOut)
-from .slots import free_slots
+from .models import (ACTIVE_STATUSES, Booking, Client, Master, MasterService, Payment, Review,
+                     Service, Tenant)
+from .notify import esc
+from .schemas import (BookingIn, BookingOut, ClientIn, ClientOut, MasterOut, ReceiptIn, ReviewIn,
+                      SalonOut, ServiceOut)
+from .slots import available_days, free_slots
 
 router = APIRouter()
-_booking_lock = asyncio.Lock()  # страховка для SQLite / одного процесса
-
-
-def booking_out(b: Booking) -> BookingOut:
-    return BookingOut(
-        id=b.id, starts_at=b.starts_at, ends_at=b.ends_at, price=b.price, status=b.status,
-        master_name=b.master.name, service_name=b.service.name,
-        client_name=b.client.name, client_phone=b.client.phone)
-
-
-def local(b: Booking) -> str:
-    return b.starts_at.astimezone(ZoneInfo(b.tenant.timezone)).strftime("%d.%m в %H:%M")
+_booking_lock = asyncio.Lock()  # SQLite / один процесс; в Postgres ещё лок строки и EXCLUDE
 
 
 # ---------- каталог ----------
@@ -38,7 +31,11 @@ async def salon(t: Tenant = Depends(get_tenant)):
 
 @router.get("/services", response_model=list[ServiceOut])
 async def services(t: Tenant = Depends(get_tenant), s: AsyncSession = Depends(get_session)):
-    q = select(Service).where(Service.tenant_id == t.id, Service.is_active).order_by(Service.price)
+    """Только услуги, которые кто-то из активных мастеров реально делает."""
+    q = (select(Service).where(Service.tenant_id == t.id, Service.is_active)
+         .where(Service.id.in_(select(MasterService.service_id).join(Master, Master.id == MasterService.master_id)
+                               .where(Master.is_active)))
+         .order_by(Service.price, Service.name))
     return (await s.scalars(q)).all()
 
 
@@ -52,13 +49,25 @@ async def masters(service_id: int | None = None, t: Tenant = Depends(get_tenant)
     return (await s.scalars(q.order_by(Master.name))).all()
 
 
-@router.get("/slots", response_model=list[datetime])
-async def slots(master_id: int, service_id: int, date: date, t: Tenant = Depends(get_tenant),
-                s: AsyncSession = Depends(get_session)):
+async def _master_service(s: AsyncSession, t: Tenant, master_id: int, service_id: int):
     master = await s.scalar(select(Master).where(Master.id == master_id, Master.tenant_id == t.id))
     service = await s.scalar(select(Service).where(Service.id == service_id, Service.tenant_id == t.id))
     if not master or not service:
         raise HTTPException(404)
+    return master, service
+
+
+@router.get("/days")
+async def days(master_id: int, service_id: int, t: Tenant = Depends(get_tenant),
+               s: AsyncSession = Depends(get_session)) -> list[dict]:
+    master, service = await _master_service(s, t, master_id, service_id)
+    return await available_days(s, t, master, service)
+
+
+@router.get("/slots", response_model=list[datetime])
+async def slots(master_id: int, service_id: int, date: date, t: Tenant = Depends(get_tenant),
+                s: AsyncSession = Depends(get_session)):
+    master, service = await _master_service(s, t, master_id, service_id)
     return await free_slots(s, t, master, service, date)
 
 
@@ -72,7 +81,11 @@ async def upsert_client(data: ClientIn, t: Tenant = Depends(get_tenant), s: Asyn
     else:
         c = Client(tenant_id=t.id, **data.model_dump())
         s.add(c)
-    await s.commit()
+    try:
+        await s.commit()
+    except IntegrityError:  # два параллельных /start одного человека
+        await s.rollback()
+        c = await s.scalar(select(Client).where(Client.tenant_id == t.id, Client.telegram_id == data.telegram_id))
     return c
 
 
@@ -80,45 +93,56 @@ async def upsert_client(data: ClientIn, t: Tenant = Depends(get_tenant), s: Asyn
 @router.post("/bookings", response_model=BookingOut, status_code=201)
 async def create_booking(data: BookingIn, t: Tenant = Depends(get_tenant), s: AsyncSession = Depends(get_session)):
     async with _booking_lock:
-        # Postgres: плюс лок строки мастера и EXCLUDE-констрейнт в БД
         master = await s.scalar(select(Master).where(
             Master.id == data.master_id, Master.tenant_id == t.id, Master.is_active).with_for_update())
-        service = await s.scalar(select(Service).where(Service.id == data.service_id, Service.tenant_id == t.id))
+        service = await s.scalar(select(Service).where(
+            Service.id == data.service_id, Service.tenant_id == t.id, Service.is_active))
         client = await s.scalar(select(Client).where(Client.id == data.client_id, Client.tenant_id == t.id))
         if not (master and service and client):
             raise HTTPException(404)
+        if client.is_blocked:
+            raise HTTPException(403, "client is blocked")
+        if not await s.scalar(select(MasterService.master_id).where(
+                MasterService.master_id == master.id, MasterService.service_id == service.id)):
+            raise HTTPException(409, "master does not provide this service")
+
+        active = await s.scalar(select(func.count(Booking.id)).where(
+            Booking.client_id == client.id, Booking.status.in_(ACTIVE_STATUSES),
+            Booking.starts_at > datetime.now(timezone.utc)))
+        if active >= settings.max_active_bookings:
+            raise HTTPException(429, "too many active bookings")
 
         day = data.starts_at.astimezone(ZoneInfo(t.timezone)).date()
         if data.starts_at not in await free_slots(s, t, master, service, day):
             raise HTTPException(409, "slot is not available")
 
+        prepay = t.prepay_amount > 0
         b = Booking(tenant_id=t.id, master_id=master.id, service_id=service.id, client_id=client.id,
                     starts_at=data.starts_at,
-                    ends_at=data.starts_at + timedelta(minutes=service.duration_min), price=service.price)
+                    ends_at=data.starts_at + timedelta(minutes=service.duration_min), price=service.price,
+                    status="pending_payment" if prepay else "confirmed")
         s.add(b)
         try:
+            await s.flush()
+            if prepay:
+                s.add(Payment(booking_id=b.id, amount=t.prepay_amount, status="awaiting"))
             await s.commit()
-        except IntegrityError:
+        except IntegrityError:  # Postgres EXCLUDE: интервал уже занят
             await s.rollback()
             raise HTTPException(409, "slot is not available")
 
-    b = await s.scalar(select(Booking).where(Booking.id == b.id).execution_options(populate_existing=True))
-    text = (f"🔔 <b>Новая запись</b>\n\n💇 {notify.esc(b.master.name)}\n✂️ {notify.esc(b.service.name)} ({b.price}₽)\n"
-            f"📅 {local(b)}\n👤 {notify.esc(client.name)} (@{notify.esc(client.username or 'нет')})\n"
-            f"📞 <code>{notify.esc(client.phone)}</code>")
-    await notify.send(master.telegram_chat_id, text)
-    if t.admin_chat_id != master.telegram_chat_id:
-        await notify.send(t.admin_chat_id, text)
-    return booking_out(b)
+    b = await bk.reload(s, b.id)
+    await bk.announce_new(b)
+    return bk.booking_out(b)
 
 
 @router.get("/bookings", response_model=list[BookingOut])
 async def my_bookings(telegram_id: int, t: Tenant = Depends(get_tenant), s: AsyncSession = Depends(get_session)):
     q = (select(Booking).join(Client, Client.id == Booking.client_id)
          .where(Booking.tenant_id == t.id, Client.telegram_id == telegram_id,
-                Booking.status == "confirmed", Booking.ends_at > datetime.now(timezone.utc))
+                Booking.status.in_(ACTIVE_STATUSES), Booking.ends_at > datetime.now(timezone.utc))
          .order_by(Booking.starts_at))
-    return [booking_out(b) for b in (await s.scalars(q)).unique().all()]
+    return [bk.booking_out(b) for b in (await s.scalars(q)).unique().all()]
 
 
 async def _own_booking(s: AsyncSession, t: Tenant, booking_id: int, telegram_id: int) -> Booking:
@@ -133,62 +157,56 @@ async def _own_booking(s: AsyncSession, t: Tenant, booking_id: int, telegram_id:
 async def cancel(booking_id: int, telegram_id: int, t: Tenant = Depends(get_tenant),
                  s: AsyncSession = Depends(get_session)):
     b = await _own_booking(s, t, booking_id, telegram_id)
-    if b.status != "confirmed":
+    if b.status not in ACTIVE_STATUSES or b.ends_at <= datetime.now(timezone.utc):
         raise HTTPException(409, "already " + b.status)
-    b.status = "cancelled"
-    await s.commit()
-    text = f"❌ <b>Клиент отменил запись</b>\n\n💇 {notify.esc(b.master.name)}\n📅 {local(b)}\n👤 {notify.esc(b.client.name)}"
-    await notify.send(b.master.telegram_chat_id, text)
-    if t.admin_chat_id != b.master.telegram_chat_id:
-        await notify.send(t.admin_chat_id, text)
-    return booking_out(b)
+    await bk.cancel(s, b, "client")
+    return bk.booking_out(b)
 
 
 @router.post("/bookings/{booking_id}/confirm", response_model=BookingOut)
 async def client_confirm(booking_id: int, telegram_id: int, t: Tenant = Depends(get_tenant),
                          s: AsyncSession = Depends(get_session)):
+    """Кнопка «Приду» из напоминания."""
     b = await _own_booking(s, t, booking_id, telegram_id)
+    if b.status != "confirmed":
+        raise HTTPException(409, "booking is " + b.status)
     b.client_confirmed = True
     await s.commit()
-    return booking_out(b)
+    return bk.booking_out(b)
 
 
 @router.post("/bookings/{booking_id}/review", status_code=201)
 async def review(booking_id: int, telegram_id: int, data: ReviewIn, t: Tenant = Depends(get_tenant),
                  s: AsyncSession = Depends(get_session)):
     b = await _own_booking(s, t, booking_id, telegram_id)
+    if b.status != "completed":
+        raise HTTPException(409, "visit not completed")
     if await s.scalar(select(Review).where(Review.booking_id == b.id)):
         raise HTTPException(409, "already reviewed")
     s.add(Review(booking_id=b.id, rating=data.rating, text=data.text))
     await s.commit()
+    stars = "⭐" * data.rating
+    extra = f"\n💬 {esc(data.text)}" if data.text else ""
+    await bk.to_staff(b, f"{stars} <b>Отзыв {data.rating}/5</b>\n\n💇 {esc(b.master.name)} · "
+                         f"✂️ {esc(b.service.name)}\n👤 {esc(b.client.name)} · {bk.when(b)}{extra}")
     return {"ok": True}
 
 
-# ---------- админка (под будущую веб-панель) ----------
-@router.get("/admin/schedule", response_model=list[BookingOut])
-async def schedule(day: date, master_id: int | None = None, t: Tenant = Depends(get_tenant),
-                   s: AsyncSession = Depends(get_session)):
-    tz = ZoneInfo(t.timezone)
-    start = datetime.combine(day, datetime.min.time(), tzinfo=tz)
-    q = select(Booking).where(Booking.tenant_id == t.id, Booking.status != "cancelled",
-                              Booking.starts_at >= start, Booking.starts_at < start + timedelta(days=1))
-    if master_id:
-        q = q.where(Booking.master_id == master_id)
-    return [booking_out(b) for b in (await s.scalars(q.order_by(Booking.starts_at))).unique().all()]
-
-
-# ---------- для мастеров и админа в боте ----------
-@router.get("/staff/schedule", response_model=list[BookingOut])
-async def staff_schedule(telegram_id: int, day: date, t: Tenant = Depends(get_tenant),
-                         s: AsyncSession = Depends(get_session)):
-    """Админ салона (tenants.admin_chat_id) видит всех, мастер (masters.telegram_chat_id) — только себя."""
-    tz = ZoneInfo(t.timezone)
-    start = datetime.combine(day, datetime.min.time(), tzinfo=tz)
-    q = select(Booking).where(Booking.tenant_id == t.id, Booking.status != "cancelled",
-                              Booking.starts_at >= start, Booking.starts_at < start + timedelta(days=1))
-    if telegram_id != t.admin_chat_id:
-        m = await s.scalar(select(Master).where(Master.tenant_id == t.id, Master.telegram_chat_id == telegram_id))
-        if not m:
-            raise HTTPException(403, "not staff")
-        q = q.where(Booking.master_id == m.id)
-    return [booking_out(b) for b in (await s.scalars(q.order_by(Booking.starts_at))).unique().all()]
+@router.post("/bookings/{booking_id}/receipt", status_code=201)
+async def receipt(booking_id: int, telegram_id: int, data: ReceiptIn, t: Tenant = Depends(get_tenant),
+                  s: AsyncSession = Depends(get_session)):
+    """Клиент прислал чек о предоплате — пересылаем админу с кнопками подтвердить/отклонить."""
+    b = await _own_booking(s, t, booking_id, telegram_id)
+    if b.status != "pending_payment":
+        raise HTTPException(409, "booking is " + b.status)
+    p = await s.scalar(select(Payment).where(Payment.booking_id == b.id,
+                                             Payment.status.in_(("awaiting", "pending"))))
+    if not p:
+        raise HTTPException(409, "no payment expected")
+    p.receipt_file_id, p.status = data.file_id, "pending"
+    await s.commit()
+    kb = {"inline_keyboard": [[{"text": "✅ Оплата пришла", "callback_data": f"pay_ok:{p.id}"},
+                               {"text": "❌ Отклонить", "callback_data": f"pay_no:{p.id}"}]]}
+    sent = await notify.send_file(t.admin_chat_id, data.file_id, data.kind,
+                                  bk.card(b, f"💳 <b>Чек о предоплате {p.amount}₽</b>"), kb)
+    return {"ok": True, "delivered": sent}

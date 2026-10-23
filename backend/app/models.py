@@ -1,11 +1,16 @@
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 
-from .config import settings
-from sqlalchemy import (BigInteger, Boolean, DateTime, ForeignKey, SmallInteger,
+from sqlalchemy import (BigInteger, Boolean, Date, DateTime, ForeignKey, Index, SmallInteger,
                         String, Text, Time, UniqueConstraint, func, text)
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
-from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
+
+from .config import settings
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -43,15 +48,22 @@ class Tenant(Base):
     work_hours_text: Mapped[str | None] = mapped_column(String(120))
     instagram_url: Mapped[str | None] = mapped_column(String(200))
     welcome_text: Mapped[str | None] = mapped_column(Text)
+    # предоплата: 0 = выключена; payment_details — куда переводить (показывается клиенту)
+    prepay_amount: Mapped[int] = mapped_column(default=0, server_default="0")
+    payment_details: Mapped[str | None] = mapped_column(Text)
+    # одноразовый код: кто откроет ссылку t.me/<bot>?start=admin_<код>, тот станет админом
+    admin_invite_code: Mapped[str | None] = mapped_column(String(32))
 
 
 class Master(Base):
     __tablename__ = "masters"
+    __table_args__ = (Index("ix_masters_invite_code", "invite_code", unique=True),)
     id: Mapped[int] = mapped_column(primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
     name: Mapped[str] = mapped_column(String(80))
     telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    invite_code: Mapped[str | None] = mapped_column(String(32))  # ссылка-приглашение для мастера
 
 
 class Service(Base):
@@ -80,6 +92,15 @@ class WorkingHours(Base):
     end_time: Mapped[time] = mapped_column(Time)
 
 
+class MasterTimeOff(Base):
+    """Выходной/больничный/отпуск мастера на конкретную дату — слоты в этот день не выдаются."""
+    __tablename__ = "master_time_off"
+    __table_args__ = (UniqueConstraint("master_id", "day"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
+    day: Mapped[date] = mapped_column(Date)
+
+
 class Client(Base):
     __tablename__ = "clients"
     __table_args__ = (UniqueConstraint("tenant_id", "telegram_id"),)
@@ -89,7 +110,18 @@ class Client(Base):
     username: Mapped[str | None] = mapped_column(String(80))
     name: Mapped[str | None] = mapped_column(String(120))
     phone: Mapped[str | None] = mapped_column(String(32))
-    notes: Mapped[str | None] = mapped_column(Text)  # аллергии, предпочтения
+    notes: Mapped[str | None] = mapped_column(Text)  # заметки мастера: предпочтения, аллергии
+    is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    created_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+# Статусы записи:
+#   pending_payment — ждём предоплату (слот уже держим)
+#   confirmed       — подтверждена
+#   completed       — визит прошёл (ставится автоматически после окончания)
+#   cancelled       — отменена (cancelled_by: client | staff | system)
+#   no_show         — клиент не пришёл (отмечает мастер/админ)
+ACTIVE_STATUSES = ("pending_payment", "confirmed")
 
 
 class Booking(Base):
@@ -102,8 +134,8 @@ class Booking(Base):
     starts_at: Mapped[datetime] = mapped_column(UTCDateTime())
     ends_at: Mapped[datetime] = mapped_column(UTCDateTime())
     price: Mapped[int]  # цена фиксируется на момент записи
-    # confirmed | cancelled | completed | no_show   (pending_payment — когда добавим предоплату)
     status: Mapped[str] = mapped_column(String(20), default="confirmed")
+    cancelled_by: Mapped[str | None] = mapped_column(String(10))
     client_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     reminded_24h: Mapped[bool] = mapped_column(Boolean, default=False)
     reminded_2h: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -114,9 +146,9 @@ class Booking(Base):
     service: Mapped[Service] = relationship(lazy="joined")
     client: Mapped[Client] = relationship(lazy="joined")
 
-    # В SQLite EXCLUDE нет: там защита — asyncio.Lock в create_booking (один процесс)
+    # Postgres: БД физически не даст пересечь интервалы одного мастера.
+    # В SQLite EXCLUDE нет — там защищает asyncio.Lock в create_booking (бэкенд = один процесс).
     __table_args__ = (
-        # Главная защита от двойной записи: БД физически не даст пересечь интервалы одного мастера
         ExcludeConstraint(
             ("master_id", "="),
             (text("tstzrange(starts_at, ends_at)"), "&&"),
@@ -128,14 +160,17 @@ class Booking(Base):
 
 
 class Payment(Base):
-    """Задел под ручную предоплату: клиент шлёт чек, админ подтверждает."""
+    """Ручная предоплата: клиент шлёт чек, админ подтверждает.
+    status: awaiting (ждём чек) | pending (чек прислан, ждёт админа) | approved | rejected | expired"""
     __tablename__ = "payments"
     id: Mapped[int] = mapped_column(primary_key=True)
     booking_id: Mapped[int] = mapped_column(ForeignKey("bookings.id"), index=True)
     amount: Mapped[int]
     receipt_file_id: Mapped[str | None] = mapped_column(String(200))  # telegram file_id
-    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|approved|rejected
+    status: Mapped[str] = mapped_column(String(20), default="awaiting")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
+
+    booking: Mapped[Booking] = relationship(lazy="joined")
 
 
 class Review(Base):

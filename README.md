@@ -76,17 +76,20 @@ cd salon-parik
 
 Настройки в `.env` (см. `.env.example`): шаг сетки времени, горизонт записи, лимит активных записей на клиента, время ожидания чека.
 
-## Разработка
-
-Без Docker, на SQLite:
+## Локальный запуск (Mac/Linux, без Docker)
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
+cp .env.example .env     # вписать BOT_TOKEN, TENANT_API_KEY (любая длинная строка), SALON_NAME
+./run_local.sh
+```
+Скрипт сам создаст `.venv`, поставит зависимости, поднимет API на SQLite (`backend/parik.db`) и запустит бота. Остановить: `Ctrl+C`. Демо-данные: `cd backend && ../.venv/bin/python -m app.manage demo`.
+
+Один токен — один запущенный бот. Если этот же бот уже работает где-то ещё, Telegram выдаст ошибку `Conflict`. Остановите другой экземпляр.
+
+## Разработка
+
+```bash
 pip install -r requirements-dev.txt
-cp .env.example .env        # вписать BOT_TOKEN, TENANT_API_KEY (любой), SALON_NAME
-cd backend && python -m app.manage init && python -m app.manage demo
-uvicorn app.main:app --port 8000          # терминал 1
-cd ../bot && python main.py                # терминал 2
 ```
 
 Тесты:

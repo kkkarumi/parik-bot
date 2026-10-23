@@ -79,7 +79,7 @@ async def test_master_hours_timeoff_invite(h):
     assert any("Готово, Тимур" in x for x in t.texts())
     assert any(n == "setMyCommands" for n, _ in h.tg.calls)
     await t.send("/schedule")
-    assert "Записей нет" in t.last_text()
+    assert "Предстоящих записей нет" in t.last_text()
     t2 = h.chat(2003, "Хитрый")
     await t2.send(f"/start {code}")
     assert any("недействительна" in x for x in t2.texts())
@@ -200,3 +200,71 @@ async def test_admin_handover(h):
     assert "только администратору" in a.last_text()
     await owner.send("/admin")
     assert "Админка «Парик»" in owner.last_text()
+
+
+async def test_admin_cancels_client_booking_from_list(h):
+    """Админ: /admin → «Записи клиентов» → запись → «Отменить» → «Да» → клиент уведомлён, запись пропала."""
+    c1, c2 = h.chat(CLIENT, "Иван", "ivan"), h.chat(502, "Аслан")
+    await _book(c1)
+    await _book(c2, master="Тимур", time="15:00", phone_contact="+79282223344")
+    a = h.chat(ADMIN, "Админ")
+    await a.send("/start")
+    await a.press(a.button("Записи клиентов"))
+    assert "Предстоящие записи: 2" in a.last_text()
+    assert "Иван" in a.last_text() and "Аслан" in a.last_text()
+    # фильтр по мастеру
+    flt = {t: d for t, d in a.buttons() if d.startswith("up:0")}
+    assert set(flt) == {"• Все", "Алим", "Тимур"}
+    await a.press(flt["Тимур"])
+    assert "Предстоящие записи: 1" in a.last_text() and "Аслан" in a.last_text()
+    await a.press("up:0")
+    await a.press(a.button("Иван"))
+    assert "Запись №" in a.last_text()
+    await a.press(a.button("Отменить запись"))
+    await a.press(a.button("Да, отменить"))
+    assert "отменена, клиент уведомлён" in a.last_text()
+    assert any("отменена салоном" in t for t in h.notified(CLIENT))
+    assert any("Запись отменена" in t for t in h.notified(MASTER1))  # мастер Алим тоже знает
+    await a.press(a.button("К списку записей"))
+    assert "Предстоящие записи: 1" in a.last_text() and "Иван" not in a.last_text()
+    async with SessionLocal() as s:
+        statuses = sorted(b.status for b in (await s.scalars(select(Booking))).unique().all())
+    assert statuses == ["cancelled", "confirmed"]
+
+
+async def test_admin_menu_has_bookings_button(h):
+    a = h.chat(ADMIN, "Админ")
+    await a.send("/admin")
+    assert a.button("Записи клиентов") == "up:0"
+
+
+async def test_list_pagination_and_back_from_client_card(h):
+    from datetime import datetime, timedelta, timezone
+    from app.models import Client
+    async with SessionLocal() as s:
+        t = await s.scalar(select(Tenant))
+        m = await s.scalar(select(Master).where(Master.name == "Алим"))
+        sv = await s.scalar(select(Service).where(Service.name == "Борода"))
+        cl = Client(tenant_id=t.id, telegram_id=777, name="Мурат", phone="+79280000001")
+        s.add(cl)
+        await s.flush()
+        start = datetime.now(timezone.utc) + timedelta(days=1)
+        for i in range(13):
+            st = start + timedelta(hours=i)
+            s.add(Booking(tenant_id=t.id, master_id=m.id, service_id=sv.id, client_id=cl.id, starts_at=st,
+                          ends_at=st + timedelta(minutes=30), price=500, status="confirmed"))
+        await s.commit()
+    mst = h.chat(MASTER1, "Алим")
+    await mst.send("/schedule")
+    assert "Предстоящие записи: 13" in mst.last_text()
+    await mst.press(mst.button("Дальше"))
+    assert len([b for b in mst.buttons() if b[1].startswith("bk:")]) == 3
+    first = [d for _, d in mst.buttons() if d.startswith("bk:")][0]
+    assert first.endswith(":u1")
+    await mst.press(first)
+    await mst.press(mst.button("Карточка клиента"))
+    assert "Мурат" in mst.last_text()
+    await mst.press(mst.button("Назад"))
+    assert "Запись №" in mst.last_text()
+    await mst.press(mst.button("К списку записей"))
+    assert "Раньше" in " ".join(t for t, _ in mst.buttons())

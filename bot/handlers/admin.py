@@ -43,7 +43,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raise
     prepay = f"включена, {s['prepay_amount']}₽" if s["prepay_amount"] else "выключена"
     await show(update, f"⚙️ <b>Админка «{e(s['name'])}»</b>\n\nПредоплата: {prepay}", kb(
-        [Btn("📋 Расписание", callback_data="sch:today"), Btn("📊 Статистика", callback_data="a:stats:30")],
+        [Btn("📋 Записи клиентов", callback_data="up:0"), Btn("📊 Статистика", callback_data="a:stats:30")],
         [Btn("✂️ Услуги и цены", callback_data="a:svcs"), Btn("👥 Мастера", callback_data="a:msts")],
         [Btn("🏠 Салон", callback_data="a:salon"), Btn("💳 Предоплата", callback_data="a:prepay")],
         [Btn("🔎 Найти клиента", callback_data="a:find"), Btn("📣 Рассылка", callback_data="a:bc")],

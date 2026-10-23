@@ -10,7 +10,7 @@ from ui import e, main_menu, show
 log = logging.getLogger(__name__)
 
 CLIENT_COMMANDS = [("start", "🏠 Главное меню")]
-MASTER_COMMANDS = CLIENT_COMMANDS + [("schedule", "📋 Расписание")]
+MASTER_COMMANDS = CLIENT_COMMANDS + [("schedule", "📋 Записи клиентов")]
 ADMIN_COMMANDS = MASTER_COMMANDS + [("admin", "⚙️ Админка")]
 
 
@@ -50,9 +50,9 @@ async def _accept_invite(update: Update, context: ContextTypes.DEFAULT_TYPE, cod
         await update.effective_chat.send_message(
             f"👑 Готово! Вы — администратор «{e(r['name'])}».\n\n"
             "• /admin — настройки: услуги, цены, мастера, график, предоплата, статистика\n"
-            "• /schedule — записи по дням\n\nСюда же будут приходить уведомления о новых записях и отменах.",
+            "• /schedule — записи клиентов: отменить, посмотреть клиента\n\nСюда же будут приходить уведомления о новых записях и отменах.",
             parse_mode="HTML")
     else:
         await update.effective_chat.send_message(
             f"💇 Готово, {e(r['name'])}! Теперь сюда будут приходить ваши новые записи и отмены, "
-            "а по /schedule — расписание на день.", parse_mode="HTML")
+            "а по /schedule — все ваши записи.", parse_mode="HTML")

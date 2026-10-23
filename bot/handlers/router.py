@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 SCREENS: dict[str, Callable[..., Awaitable[None]]] = {}
-PATTERN = r"^(a|sch|bk|bkc|bkcy|bkn|cl|cln|clb):"
+PATTERN = r"^(a|up|sch|bk|bkc|bkcy|bkn|cl|cln|clb):"
 
 
 def screen(key: str):

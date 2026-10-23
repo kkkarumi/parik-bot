@@ -52,9 +52,9 @@ def main_menu(role: str | None = None) -> Markup:
          [Btn("🗂 Мои записи", callback_data="menu_profile"), Btn("💰 Прайс", callback_data="menu_price")],
          [Btn("📸 Наши работы", callback_data="menu_portfolio"), Btn("📞 Контакты", callback_data="menu_contacts")]]
     if role == "admin":
-        r.append([Btn("⚙️ Админка", callback_data="a:menu")])
+        r.append([Btn("📋 Записи клиентов", callback_data="up:0"), Btn("⚙️ Админка", callback_data="a:menu")])
     elif role == "master":
-        r.append([Btn("📋 Моё расписание", callback_data="sch:today")])
+        r.append([Btn("📋 Мои записи клиентов", callback_data="up:0")])
     return Markup(r)
 
 

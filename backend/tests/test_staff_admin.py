@@ -193,3 +193,16 @@ async def test_stats(api, salon):
     st = (await api.get("/admin/stats", params={"telegram_id": ADMIN})).json()
     assert st["completed"] == 2 and st["revenue"] == 1600 and st["upcoming"] == 1
     assert st["by_master"][0] == {"name": "Алим", "visits": 2, "revenue": 1600}
+
+
+async def test_upcoming_list(api, salon):
+    await book(api, salon, at=tomorrow_at(12))
+    await book(api, salon, client="c2", master="m2", at=tomorrow_at(10))
+    r = (await api.get("/staff/upcoming", params={"telegram_id": ADMIN})).json()
+    assert [b["master_name"] for b in r] == ["Тимур", "Алим"]  # по времени
+    assert len((await api.get("/staff/upcoming", params={"telegram_id": ADMIN, "master_id": salon["m1"]})).json()) == 1
+    own = (await api.get("/staff/upcoming", params={"telegram_id": M1, "master_id": salon["m2"]})).json()
+    assert [b["master_name"] for b in own] == ["Алим"]  # мастеру фильтр по чужому не помогает
+    await api.post(f"/staff/bookings/{r[0]['id']}/cancel", params={"telegram_id": ADMIN})
+    assert len((await api.get("/staff/upcoming", params={"telegram_id": ADMIN})).json()) == 1
+    assert (await api.get("/staff/upcoming", params={"telegram_id": STRANGER})).status_code == 403

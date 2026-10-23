@@ -65,6 +65,20 @@ async def schedule(day: date, st: Staff = Depends(get_staff), s: AsyncSession = 
     return [bk.booking_out(b) for b in (await s.scalars(q.order_by(Booking.starts_at, Booking.master_id))).unique().all()]
 
 
+@router.get("/upcoming", response_model=list[BookingOut])
+async def upcoming(limit: int = 40, master_id: int | None = None, st: Staff = Depends(get_staff),
+                   s: AsyncSession = Depends(get_session)):
+    """Все будущие активные записи одним списком (по времени). Мастер — только свои."""
+    q = select(Booking).where(Booking.tenant_id == st.tenant.id, Booking.status.in_(ACTIVE_STATUSES),
+                              Booking.ends_at > datetime.now(timezone.utc))
+    if not st.is_admin:
+        q = q.where(Booking.master_id == st.master.id)
+    elif master_id:
+        q = q.where(Booking.master_id == master_id)
+    q = q.order_by(Booking.starts_at, Booking.master_id).limit(min(max(limit, 1), 100))
+    return [bk.booking_out(b) for b in (await s.scalars(q)).unique().all()]
+
+
 async def _staff_booking(s: AsyncSession, st: Staff, booking_id: int) -> Booking:
     b = await s.scalar(select(Booking).where(Booking.id == booking_id, Booking.tenant_id == st.tenant.id))
     if not b or not st.can_manage(b.master_id):

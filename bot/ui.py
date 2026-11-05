@@ -50,7 +50,8 @@ def kb(*rows_) -> Markup:
 def main_menu(role: str | None = None, is_master: bool = False) -> Markup:
     r = [[Btn("📅 Записаться", callback_data="menu_book")],
          [Btn("🗂 Мои записи", callback_data="menu_profile"), Btn("💰 Прайс", callback_data="menu_price")],
-         [Btn("📸 Наши работы", callback_data="menu_portfolio"), Btn("📞 Контакты", callback_data="menu_contacts")]]
+         [Btn("📸 Наши работы", callback_data="menu_portfolio"), Btn("📞 Контакты", callback_data="menu_contacts")],
+         [Btn("🔒 Мои данные", callback_data="menu_privacy")]]
     if role == "admin":
         r.append([Btn("📋 Записи клиентов", callback_data="up:0"), Btn("⚙️ Админка", callback_data="a:menu")])
         if is_master:

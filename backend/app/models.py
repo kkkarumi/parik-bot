@@ -113,6 +113,10 @@ class Client(Base):
     notes: Mapped[str | None] = mapped_column(Text)  # заметки мастера: предпочтения, аллергии
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     created_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=utcnow)
+    # 152-ФЗ: когда клиент нажал «Согласен» (без согласия запись невозможна)
+    consent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    # клиент отозвал согласие (/forget): ПДн стёрты, telegram_id заменён на -id, история осталась без ПДн
+    erased_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 # Статусы записи:

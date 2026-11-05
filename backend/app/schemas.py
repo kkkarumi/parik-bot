@@ -128,6 +128,7 @@ class ClientOut(ORM):
     name: str | None = None
     phone: str | None = None
     is_blocked: bool = False
+    consent_at: datetime | None = None
 
 
 class ClientPatch(BaseModel):

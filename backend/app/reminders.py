@@ -74,7 +74,8 @@ async def _finish_visits(s, now: datetime) -> int:
     for b in finished:
         b.status = "completed"
         await s.commit()
-        if b.ends_at > now - timedelta(hours=settings.review_window_hours):  # после простоя не спамим
+        if b.client.erased_at is None and b.ends_at > now - timedelta(hours=settings.review_window_hours):
+            # после простоя не спамим; клиенту, удалившему данные, не пишем
             kb = {"inline_keyboard": [[{"text": "⭐" * n, "callback_data": f"rev:{b.id}:{n}"}]
                                       for n in (5, 4, 3, 2, 1)]}
             await notify.send(b.client.telegram_id,

@@ -16,6 +16,7 @@ from handlers.client import (cancel_ask, cancel_no, cancel_yes, rate, receipt, r
 from handlers.common import ask_cancel, on_error, on_text, stale_button
 from handlers.info import back_to_menu, show_contacts, show_portfolio, show_price
 from handlers.payments import decide
+from handlers.privacy import forget_ask, forget_yes, privacy
 from handlers.router import PATTERN, on_callback
 from handlers.start import CLIENT_COMMANDS, set_staff_commands, start_command
 
@@ -80,12 +81,17 @@ def build(request: BaseRequest | None = None, updates_request: BaseRequest | Non
     app.add_handler(CommandHandler("admin", admin.admin_cmd, filters=private))
     app.add_handler(CommandHandler("schedule", staff.schedule_cmd, filters=private))
     app.add_handler(CommandHandler("myid", staff.myid, filters=private))
+    app.add_handler(CommandHandler("privacy", privacy, filters=private))
+    app.add_handler(CommandHandler("forget", forget_ask, filters=private))
 
     app.add_handler(CallbackQueryHandler(back_to_menu, pattern=r"^back_to_menu$"))
     app.add_handler(CallbackQueryHandler(show_price, pattern=r"^menu_price$"))
     app.add_handler(CallbackQueryHandler(show_portfolio, pattern=r"^menu_portfolio$"))
     app.add_handler(CallbackQueryHandler(show_contacts, pattern=r"^menu_contacts$"))
     app.add_handler(CallbackQueryHandler(show_profile, pattern=r"^menu_profile$"))
+    app.add_handler(CallbackQueryHandler(privacy, pattern=r"^menu_privacy$"))
+    app.add_handler(CallbackQueryHandler(forget_ask, pattern=r"^forget_ask$"))
+    app.add_handler(CallbackQueryHandler(forget_yes, pattern=r"^forget_yes$"))
     app.add_handler(CallbackQueryHandler(cancel_ask, pattern=r"^cancel_id:\d+$"))
     app.add_handler(CallbackQueryHandler(cancel_yes, pattern=r"^cancel_yes:\d+$"))
     app.add_handler(CallbackQueryHandler(cancel_no, pattern=r"^cancel_no:\d+$"))

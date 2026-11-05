@@ -27,7 +27,7 @@ async def test_all_requests_go_to_relay(relay, h):
     assert h.app.bot.base_file_url == f"{RELAY}/file/bot{token}"
     c = h.chat(CLIENT, "Иван")
     await c.send("/start")
-    await c.press("menu_book")
+    await c.open_booking()
     assert h.tg.urls and all(u.startswith(f"{RELAY}/bot{token}/") for u in h.tg.urls), h.tg.urls
 
 

@@ -123,6 +123,13 @@ class Chat:
               "message": msg}
         return await self._process({"callback_query": cq})
 
+    async def open_booking(self):
+        """«📅 Записаться»; если бот спросил согласие на обработку ПДн — соглашаемся."""
+        await self.press("menu_book")
+        if "Согласие на обработку" in self.last_text():
+            await self.press("consent_yes")
+        return self.h.tg.calls
+
     # --- что ответил бот ---
     def texts(self) -> list[str]:
         return [p.get("text") or p.get("caption") or "" for n, p in self.h.tg.calls

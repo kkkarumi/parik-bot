@@ -248,7 +248,8 @@ async def search_clients(q: str, t: Tenant = Depends(require_admin), s: AsyncSes
 @router.get("/clients/ids", response_model=list[int])
 async def client_ids(t: Tenant = Depends(require_admin), s: AsyncSession = Depends(get_session)):
     """Для рассылки: все незаблокированные клиенты."""
-    return (await s.scalars(select(Client.telegram_id).where(Client.tenant_id == t.id, ~Client.is_blocked))).all()
+    return (await s.scalars(select(Client.telegram_id).where(
+        Client.tenant_id == t.id, ~Client.is_blocked, Client.erased_at.is_(None)))).all()
 
 
 # ---------- предоплата ----------

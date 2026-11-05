@@ -209,4 +209,4 @@ async def receipt(booking_id: int, telegram_id: int, data: ReceiptIn, t: Tenant 
                                {"text": "❌ Отклонить", "callback_data": f"pay_no:{p.id}"}]]}
     sent = await notify.send_file(t.admin_chat_id, data.file_id, data.kind,
                                   bk.card(b, f"💳 <b>Чек о предоплате {p.amount}₽</b>"), kb)
-    return {"ok": True, "delivered": sent}
+    return {"ok": True, "delivered": bool(sent)}

@@ -5,10 +5,13 @@
   demo        добавить демо-услуги и демо-мастеров (если их ещё нет)
   admin-link  выдать новую ссылку для входа админа (старый админ остаётся до перехода по ссылке)
   status      что сейчас в базе
+  check-telegram  проверить, достаёт ли сервер до Telegram (напрямую или через релей TELEGRAM_API_BASE)
 """
 import asyncio
 import os
 import sys
+from urllib.parse import urlsplit
+
 import httpx
 from dotenv import load_dotenv
 from sqlalchemy import func, select
@@ -18,18 +21,62 @@ from .config import ROOT, settings
 from .db import SessionLocal, engine
 from .migrate import upgrade_db
 from .models import Booking, Client, Master, MasterService, Service, Tenant, WorkingHours
+from .notify import api_url, mask
 
 load_dotenv(ROOT / ".env")
+
+RELAY_HINT = ("Если сервер в РФ, настройте релей (relay/README.md) и впишите его адрес "
+              "в TELEGRAM_API_BASE в .env, затем: docker compose up -d")
+
+
+class TelegramUnreachable(Exception):
+    pass
+
+
+def get_me(timeout: float = 10) -> dict:
+    """getMe через TELEGRAM_API_BASE. Ошибка — TelegramUnreachable с понятной причиной (без токена)."""
+    if not settings.bot_token:
+        raise TelegramUnreachable("BOT_TOKEN не задан в .env")
+    try:
+        r = httpx.get(api_url("getMe"), timeout=timeout)
+    except httpx.TimeoutException:
+        raise TelegramUnreachable(f"нет ответа за {timeout:g} с (похоже на блокировку соединения)") from None
+    except httpx.HTTPError as e:
+        raise TelegramUnreachable(f"{type(e).__name__}: {mask(str(e))}") from None
+    try:
+        data = r.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or "ok" not in data:  # ответил не Telegram (релей, заглушка провайдера)
+        raise TelegramUnreachable(f"ответ {r.status_code} не от Telegram — проверьте адрес и секрет релея")
+    if not data["ok"]:
+        hint = " — проверьте BOT_TOKEN" if r.status_code in (401, 404) else ""
+        raise TelegramUnreachable(f"Telegram ответил {r.status_code} {mask(str(data.get('description', '')))}{hint}")
+    return data["result"]
+
+
+def _where() -> str:
+    """Куда ходим — без секретного пути релея (вывод могут скопировать в чат)."""
+    u = urlsplit(settings.telegram_api_base)
+    return f"{u.scheme}://{u.netloc}" + ("/…" if u.path.strip("/") else "")
+
+
+def check_telegram() -> bool:
+    try:
+        me = get_me()
+    except TelegramUnreachable as e:
+        print(f"❌ Не достучался до Telegram ({_where()}): {e}.\n{RELAY_HINT}")
+        return False
+    print(f"OK, бот @{me.get('username')} (Telegram через {_where()})")
+    return True
 
 
 def bot_link(code: str) -> str:
     username = None
-    if settings.bot_token:
-        try:
-            r = httpx.get(f"https://api.telegram.org/bot{settings.bot_token}/getMe", timeout=10)
-            username = r.json()["result"]["username"]
-        except Exception:
-            pass
+    try:
+        username = get_me()["username"]
+    except Exception:
+        pass
     if username:
         return f"https://t.me/{username}?start={code}"
     return f"откройте бота и отправьте: /start {code}"
@@ -116,6 +163,8 @@ async def main(cmd: str):
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "check-telegram":  # база не нужна
+        sys.exit(0 if check_telegram() else 1)
     if cmd not in ("init", "demo", "admin-link", "status"):
         print(__doc__)
         sys.exit(1)

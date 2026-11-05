@@ -37,6 +37,7 @@ class FakeTelegram(BaseRequest):
 
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
+        self.urls: list[str] = []
         self._ids = itertools.count(10_000)
 
     async def initialize(self):
@@ -50,6 +51,7 @@ class FakeTelegram(BaseRequest):
         return 1
 
     async def do_request(self, url, method, request_data=None, **_):
+        self.urls.append(url)
         name = url.rsplit("/", 1)[-1]
         params = dict(request_data.parameters) if request_data else {}
         for k, v in list(params.items()):
@@ -196,13 +198,7 @@ async def h(monkeypatch):
     tg = FakeTelegram()
     import config as bot_config
     monkeypatch.setattr(bot_config, "STATE_FILE", "")
-    from telegram.ext import Application
-    orig = Application.builder
-
-    def builder():
-        return orig().request(tg).get_updates_request(FakeTelegram())
-    monkeypatch.setattr(Application, "builder", staticmethod(builder))
-    app = bot_main.build()
+    app = bot_main.build(request=tg, updates_request=FakeTelegram())
     await app.initialize()
     hs = Harness(app, tg)
     hs.backend_sent = harness_sent

@@ -32,7 +32,7 @@ async def test_24h_reminder_once(salon, sent):
     await _insert(salon, timedelta(hours=23), timedelta(days=2))
     await reminders.tick()
     msgs = to(sent, 501)
-    assert len(msgs) == 1 and "через 24 ч" in msgs[0]["text"]
+    assert len(msgs) == 1 and "Напоминание: запись " in msgs[0]["text"]
     assert msgs[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].startswith("rem_ok:")
     await reminders.tick()
     assert len(to(sent, 501)) == 1
@@ -42,7 +42,10 @@ async def test_2h_reminder(salon, sent):
     await _insert(salon, timedelta(minutes=90), timedelta(days=2))
     await reminders.tick()
     msgs = to(sent, 501)
-    assert len(msgs) == 1 and "через 2 ч" in msgs[0]["text"]
+    assert len(msgs) == 1 and "Напоминание: запись " in msgs[0]["text"]
+    async with SessionLocal() as s:
+        b = await s.get(Booking, (await s.scalars(select(Booking.id))).one())
+        assert b.reminded_2h and b.reminded_24h
 
 
 async def test_no_reminder_for_fresh_booking(salon, sent):
@@ -106,3 +109,70 @@ async def test_tick_survives_telegram_errors(salon, monkeypatch):
     bid = await _insert(salon, timedelta(hours=-2), timedelta(days=1))
     await reminders.tick()  # не должен упасть
     assert await _status(bid) == "completed"
+
+
+# ---------- повтор напоминаний, если Telegram/релей недоступен ----------
+def _telegram(monkeypatch, result):
+    """notify._call всегда возвращает result; считаем попытки."""
+    from app import notify
+    calls = []
+
+    async def fake(method, payload):
+        calls.append(payload)
+        return result
+    monkeypatch.setattr(notify, "_call", fake)
+    return calls
+
+
+async def _flags(bid):
+    async with SessionLocal() as s:
+        b = await s.get(Booking, bid)
+        return b.reminded_24h, b.reminded_2h
+
+
+async def test_reminder_retried_after_send_failure(salon, monkeypatch):
+    bid = await _insert(salon, timedelta(hours=23), timedelta(days=2))
+    calls = _telegram(monkeypatch, False)        # Telegram недоступен
+    await reminders.tick()
+    await reminders.tick()
+    assert len(calls) == 2 and await _flags(bid) == (False, False)
+    calls = _telegram(monkeypatch, True)         # связь вернулась
+    await reminders.tick()
+    await reminders.tick()
+    assert len(calls) == 1 and await _flags(bid) == (True, False)  # ушло ровно одно, без дублей
+
+
+async def test_reminder_not_retried_when_pointless(salon, monkeypatch):
+    bid = await _insert(salon, timedelta(hours=23), timedelta(days=2))
+    calls = _telegram(monkeypatch, None)         # клиент заблокировал бота
+    await reminders.tick()
+    await reminders.tick()
+    assert len(calls) == 1 and await _flags(bid) == (True, False)
+
+
+async def test_failed_24h_reminder_replaced_by_2h(salon, monkeypatch):
+    bid = await _insert(salon, timedelta(hours=3), timedelta(days=2))
+    _telegram(monkeypatch, False)
+    await reminders.tick()
+    assert await _flags(bid) == (False, False)
+    # прошло время: до визита 1,5 часа — «за 24 ч» уже не шлём, только «за 2 ч», один раз
+    now = datetime.now(UTC)
+    async with SessionLocal() as s:
+        await s.execute(update(Booking).where(Booking.id == bid).values(
+            starts_at=now + timedelta(minutes=90), ends_at=now + timedelta(minutes=150)))
+        await s.commit()
+    calls = _telegram(monkeypatch, True)
+    await reminders.tick()
+    await reminders.tick()
+    assert len(calls) == 1 and "сегодня в" in calls[0]["text"]
+    assert await _flags(bid) == (True, True)
+
+
+async def test_2h_reminder_retried_until_start(salon, monkeypatch):
+    bid = await _insert(salon, timedelta(minutes=30), timedelta(days=2))
+    calls = _telegram(monkeypatch, False)
+    await reminders.tick()
+    assert await _flags(bid) == (True, False)
+    calls = _telegram(monkeypatch, True)
+    await reminders.tick()
+    assert len(calls) == 1 and await _flags(bid) == (True, True)

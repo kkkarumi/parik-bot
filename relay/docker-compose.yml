@@ -1,0 +1,26 @@
+# Релей Telegram Bot API (Caddy + автоматический HTTPS). Ставится на VPS за границей.
+# Запуск: cp .env.example .env → заполнить → docker compose up -d. Подробно: README.md
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"        # нужен Let's Encrypt для выпуска сертификата
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?впишите RELAY_DOMAIN в relay/.env}
+      RELAY_SECRET: ${RELAY_SECRET:?впишите RELAY_SECRET в relay/.env (openssl rand -hex 16)}
+      # пусто = пускать с любых IP (защищает только секрет)
+      RELAY_ALLOW_IPS: ${RELAY_ALLOW_IPS:-0.0.0.0/0 ::/0}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # сертификаты — не терять, иначе упрёмся в лимиты Let's Encrypt
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  caddy_data:
+  caddy_config:

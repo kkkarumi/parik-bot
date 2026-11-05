@@ -1,6 +1,12 @@
 """Фоновая работа раз в минуту. Состояние живёт в БД (флаги reminded_*, статусы),
-поэтому рестарт бэкенда ничего не теряет и ничего не шлёт дважды."""
+поэтому рестарт бэкенда ничего не теряет и ничего не шлёт дважды.
+
+Напоминание считается отправленным, только если Telegram его принял. Если Telegram или релей
+недоступны (notify.send вернул False), флаг не ставится и на следующем тике будет новая попытка —
+пока напоминание не потеряло смысл: «за 24 ч» повторяем до начала окна «за 2 ч» (дальше его заменяет
+напоминание за 2 ч), «за 2 ч» — до начала визита."""
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 from sqlalchemy import select
@@ -12,6 +18,18 @@ from .models import Booking, Payment
 from .notify import esc
 
 
+def _relative(b: Booking, now: datetime) -> str:
+    """«сегодня в 15:00» / «завтра в 12:00»: текст верен, даже если напоминание ушло с опозданием."""
+    tz = ZoneInfo(b.tenant.timezone)
+    start = b.starts_at.astimezone(tz)
+    days = (start.date() - now.astimezone(tz).date()).days
+    if days == 0:
+        return f"сегодня в {start:%H:%M}"
+    if days == 1:
+        return f"завтра в {start:%H:%M}"
+    return bk.when(b)
+
+
 async def _reminders(s, now: datetime) -> int:
     upcoming = (await s.scalars(select(Booking).where(
         Booking.status == "confirmed", Booking.starts_at > now,
@@ -19,24 +37,33 @@ async def _reminders(s, now: datetime) -> int:
     sent = 0
     for b in upcoming:
         left = b.starts_at - now
-        hours = None
+        kind = None  # какое напоминание отправить: "2h" | "24h"
         if left <= timedelta(hours=2):
-            if not b.reminded_2h and b.created_at < b.starts_at - timedelta(hours=2):
-                hours = 2
-            b.reminded_24h = b.reminded_2h = True
+            b.reminded_24h = True  # «за 24 ч» уже не актуально — дальше только «за 2 ч»
+            if not b.reminded_2h:
+                if b.created_at < b.starts_at - timedelta(hours=2):
+                    kind = "2h"
+                else:
+                    b.reminded_2h = True  # записался меньше чем за 2 ч — напоминать незачем
         elif not b.reminded_24h:
             if b.created_at < b.starts_at - timedelta(hours=24):
-                hours = 24
-            b.reminded_24h = True
-        if hours:
+                kind = "24h"
+            else:
+                b.reminded_24h = True
+        if kind:
             kb = None if b.client_confirmed else {"inline_keyboard": [[
                 {"text": "✅ Приду", "callback_data": f"rem_ok:{b.id}"},
                 {"text": "❌ Отменить", "callback_data": f"rem_cancel:{b.id}"}]]}
             addr = f"\n📍 {esc(b.tenant.address)}" if b.tenant.address else ""
-            await notify.send(b.client.telegram_id,
-                              f"⏰ <b>Напоминание: запись через {hours} ч.</b>\n\n💇 {esc(b.master.name)}\n"
-                              f"✂️ {esc(b.service.name)}\n📅 {bk.when(b)}{addr}", kb)
-            sent += 1
+            ok = await notify.send(b.client.telegram_id,
+                                   f"⏰ <b>Напоминание: запись {_relative(b, now)}</b>\n\n💇 {esc(b.master.name)}\n"
+                                   f"✂️ {esc(b.service.name)}\n📅 {bk.when(b)}{addr}", kb)
+            if ok is not False:  # доставлено или повторять бессмысленно (клиент заблокировал бота)
+                if kind == "2h":
+                    b.reminded_2h = True
+                else:
+                    b.reminded_24h = True
+                sent += bool(ok)
         await s.commit()  # фиксируем флаг сразу, чтобы падение на следующей записи не дало дубль
     return sent
 

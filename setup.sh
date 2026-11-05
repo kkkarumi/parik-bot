@@ -25,6 +25,12 @@ else
   SALON_NAME=${SALON_NAME//\"/}
   read -rp "Часовой пояс [Europe/Moscow]: " TZ_NAME
   TZ_NAME=${TZ_NAME:-Europe/Moscow}
+  while true; do
+    read -rp "Адрес релея Telegram (Enter, если не нужен; см. relay/README.md): " TG_BASE
+    TG_BASE=${TG_BASE%/}
+    [[ -z "$TG_BASE" || "$TG_BASE" =~ ^https://[^[:space:]]+$ ]] && break
+    echo "Нужен адрес вида https://tg-relay.example.com/СЕКРЕТ (только https). Ещё раз."
+  done
   cat > .env <<ENV
 BOT_TOKEN=$BOT_TOKEN
 SALON_NAME="${SALON_NAME:-Мой салон}"
@@ -32,6 +38,7 @@ TENANT_API_KEY=$(rand 24)
 DB_PASSWORD=$(rand 16)
 TZ=$TZ_NAME
 ADMIN_CHAT_ID=
+TELEGRAM_API_BASE=$TG_BASE
 PREPAY_TIMEOUT_MIN=30
 MAX_ACTIVE_BOOKINGS=3
 BOOKING_HORIZON_DAYS=14
@@ -54,6 +61,14 @@ for _ in $(seq 1 60); do
 done
 
 docker compose exec -T backend python -m app.manage init
+
+say "Проверяю связь с Telegram…"
+if ! docker compose exec -T backend python -m app.manage check-telegram; then
+  echo "Бот не сможет работать, пока сервер не достучится до Telegram."
+  echo "Сервер в РФ? Поднимите релей по relay/README.md, впишите в .env строку"
+  echo "  TELEGRAM_API_BASE=https://ДОМЕН-РЕЛЕЯ/СЕКРЕТ"
+  echo "и выполните: docker compose up -d && docker compose exec backend python -m app.manage check-telegram"
+fi
 
 if [ -t 0 ]; then
   read -rp $'\nДобавить демо-услуги и демо-мастеров (удобно показать салону, потом поменять в /admin)? [y/N]: ' DEMO

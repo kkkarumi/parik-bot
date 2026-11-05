@@ -1,8 +1,11 @@
+import asyncio
 import logging
+from urllib.parse import urlsplit
 
 from telegram import BotCommandScopeDefault, Update
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, MessageHandler, PicklePersistence,
                           filters)
+from telegram.request import BaseRequest
 
 import config
 from api_client import api
@@ -20,25 +23,53 @@ logging.basicConfig(format="%(asctime)s %(name)s %(levelname)s %(message)s", lev
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
 
+# Таймауты запросов к Telegram, секунды. Через релей за границей ответ бывает медленнее, чем напрямую.
+CONNECT_TIMEOUT = 10
+READ_TIMEOUT = 20
+WRITE_TIMEOUT = 20
+POOL_TIMEOUT = 10
+# getUpdates (long polling): Telegram держит запрос до POLL_TIMEOUT с, PTB прибавляет его к read-таймауту
+POLL_TIMEOUT = 10
+GET_UPDATES_TIMEOUT = 10
+# post_init — меню команд и описание бота. Не критично: не держим старт дольше этого
+POST_INIT_TIMEOUT = 60
+# При старте ждём Telegram/релей бесконечно (повтор раз в секунду), а не падаем
+BOOTSTRAP_RETRIES = -1
+
+
+async def _setup_menus(app: Application):
+    await app.bot.set_my_commands(CLIENT_COMMANDS, scope=BotCommandScopeDefault())
+    ids = await api.get("/staff/ids")
+    for chat_id in ids["masters"]:
+        await set_staff_commands(app.bot, chat_id, "master")
+    if ids["admin"]:
+        await set_staff_commands(app.bot, ids["admin"], "admin")
+    salon = await api.get("/salon")
+    await app.bot.set_my_short_description(f"Онлайн-запись в «{salon['name']}» — без звонков, 24/7")
+
 
 async def post_init(app: Application):
-    await app.bot.set_my_commands(CLIENT_COMMANDS, scope=BotCommandScopeDefault())
     try:
-        ids = await api.get("/staff/ids")
-        for chat_id in ids["masters"]:
-            await set_staff_commands(app.bot, chat_id, "master")
-        if ids["admin"]:
-            await set_staff_commands(app.bot, ids["admin"], "admin")
-        salon = await api.get("/salon")
-        await app.bot.set_my_short_description(f"Онлайн-запись в «{salon['name']}» — без звонков, 24/7")
-    except Exception as err:
-        log.warning("post_init: %s", err)
-    log.info("bot @%s started", app.bot.username)
+        await asyncio.wait_for(_setup_menus(app), POST_INIT_TIMEOUT)
+    except Exception as err:  # Telegram/API недоступны — бот всё равно запускается, меню обновится при рестарте
+        log.warning("post_init: %r", err)
+    log.info("bot @%s started (Telegram API: %s)", app.bot.username, urlsplit(config.TELEGRAM_API_BASE).netloc)
 
 
-def build() -> Application:
+def build(request: BaseRequest | None = None, updates_request: BaseRequest | None = None) -> Application:
+    """request/updates_request — только для тестов (фейковый Telegram)."""
     persistence = PicklePersistence(filepath=config.STATE_FILE) if config.STATE_FILE else None
-    builder = Application.builder().token(config.BOT_TOKEN).post_init(post_init)
+    base = config.TELEGRAM_API_BASE
+    builder = (Application.builder().token(config.BOT_TOKEN)
+               .base_url(f"{base}/bot").base_file_url(f"{base}/file/bot")  # PTB допишет токен
+               .post_init(post_init))
+    if request:
+        builder = builder.request(request).get_updates_request(updates_request or request)
+    else:
+        builder = (builder.connect_timeout(CONNECT_TIMEOUT).read_timeout(READ_TIMEOUT)
+                   .write_timeout(WRITE_TIMEOUT).pool_timeout(POOL_TIMEOUT)
+                   .get_updates_connect_timeout(CONNECT_TIMEOUT).get_updates_read_timeout(GET_UPDATES_TIMEOUT)
+                   .get_updates_write_timeout(GET_UPDATES_TIMEOUT).get_updates_pool_timeout(POOL_TIMEOUT))
     if persistence:
         builder = builder.persistence(persistence)
     app = builder.build()
@@ -73,7 +104,8 @@ def build() -> Application:
 
 
 def main():
-    build().run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+    build().run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False,
+                        timeout=POLL_TIMEOUT, bootstrap_retries=BOOTSTRAP_RETRIES)
 
 
 if __name__ == "__main__":

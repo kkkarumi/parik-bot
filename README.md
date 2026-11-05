@@ -62,6 +62,12 @@ cd salon-parik
 
 Чтобы показать салону «как будет выглядеть», на шаге `setup.sh` ответьте `y` на демо-данные: появятся 4 услуги и 2 мастера.
 
+**Сервер в России.** С российских VPS Telegram API часто недоступен (соединение с `api.telegram.org` не устанавливается). Тогда бот и база остаются в РФ, а запросы к Telegram идут через релей — маленький VPS за границей с Caddy, один на все салоны: [relay/README.md](relay/README.md). Адрес релея `setup.sh` спросит сам (или впишите `TELEGRAM_API_BASE=https://ДОМЕН/СЕКРЕТ` в `.env` и `docker compose up -d`). Проверка связи:
+
+```bash
+docker compose exec backend python -m app.manage check-telegram
+```
+
 **Несколько салонов на одном сервере.** Для каждого салона своя копия папки (`git clone … salon-имя`) и свой `./setup.sh`. Docker разводит их по имени папки, базы не пересекаются. На 2 ГБ памяти спокойно живут 4–5 салонов.
 
 ## Обслуживание
@@ -75,9 +81,10 @@ cd salon-parik
 | Логи | `docker compose logs -f --tail 100 bot backend` |
 | Что в базе | `docker compose exec backend python -m app.manage status` |
 | Новая ссылка для админа | `docker compose exec backend python -m app.manage admin-link` |
+| Есть ли связь с Telegram | `docker compose exec backend python -m app.manage check-telegram` |
 | Перезапуск | `docker compose restart` |
 
-Настройки в `.env` (см. `.env.example`): шаг сетки времени, горизонт записи, лимит активных записей на клиента, время ожидания чека.
+Настройки в `.env` (см. `.env.example`): адрес Telegram API / релея (`TELEGRAM_API_BASE`), шаг сетки времени, горизонт записи, лимит активных записей на клиента, время ожидания чека.
 
 ## Локальный запуск (Mac/Linux, без Docker)
 

@@ -1,0 +1,43 @@
+# Релей Telegram Bot API для серверов, откуда Telegram недоступен (например, VPS в РФ).
+#   https://RELAY_DOMAIN/RELAY_SECRET/bot<TOKEN>/<метод>  →  https://api.telegram.org/bot<TOKEN>/<метод>
+# Настройки — в relay/.env (см. .env.example), инструкция — relay/README.md.
+{
+	# Служебные логи Caddy (ошибки проксирования и т. п.): вырезаем путь запроса —
+	# в нём секрет релея и токен бота.
+	log default {
+		output stdout
+		format filter {
+			request>uri delete
+			request>headers delete
+		}
+	}
+}
+
+{$RELAY_DOMAIN} {
+	# Журнал запросов: время, статус, длительность, IP — без пути (там секрет и токен) и без заголовков.
+	log {
+		output stdout
+		format filter {
+			request>uri delete
+			request>headers delete
+			resp_headers delete
+		}
+	}
+
+	# Пускаем только запросы с секретным префиксом и (если задано RELAY_ALLOW_IPS) только с нужных IP.
+	@relay {
+		path /{$RELAY_SECRET}/*
+		remote_ip {$RELAY_ALLOW_IPS:0.0.0.0/0 ::/0}
+	}
+	handle @relay {
+		uri strip_prefix /{$RELAY_SECRET}
+		reverse_proxy https://api.telegram.org {
+			header_up Host api.telegram.org
+		}
+	}
+
+	# Всё остальное (сканеры, неверный секрет, чужой IP) — 404, как будто здесь ничего нет.
+	handle {
+		respond 404
+	}
+}

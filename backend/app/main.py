@@ -11,10 +11,20 @@ from .config import settings
 from .db import engine
 from .migrate import upgrade_db
 from .reminders import tick
+from .sentry_scrub import make_before_send, relay_secret
 from .staff_api import router as staff_router
 
+
+def sentry_options() -> dict:
+    """Sentry за рубежом: без ПДн (152-ФЗ) и без секретов. См. sentry_scrub.py."""
+    return dict(dsn=settings.sentry_dsn, traces_sample_rate=0.0, send_default_pii=False,
+                include_local_variables=False, max_request_body_size="never",
+                before_send=make_before_send(settings.bot_token, settings.tenant_api_key,
+                                             relay_secret(settings.telegram_api_base)))
+
+
 if settings.sentry_dsn:
-    sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=0.0)
+    sentry_sdk.init(**sentry_options())
 
 
 @asynccontextmanager

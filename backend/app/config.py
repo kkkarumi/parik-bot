@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     # например https://relay.example.com/SECRET. Без «/» на конце (лишний уберём сами).
     telegram_api_base: str = TELEGRAM_API_DEFAULT
     sentry_dsn: str = ""
+    tenant_api_key: str = ""         # бэкенду не нужен — только чтобы вырезать его из событий Sentry
     slot_step_min: int = 30          # шаг сетки слотов
     booking_horizon_days: int = 14   # на сколько дней вперёд можно записаться
     max_active_bookings: int = 3     # сколько будущих записей может держать один клиент

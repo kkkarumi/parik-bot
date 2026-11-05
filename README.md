@@ -80,6 +80,7 @@ docker compose exec backend python -m app.manage check-telegram
 | Ежедневный бэкап | `crontab -e` → `15 4 * * * cd /root/salon-parik && ./scripts/backup.sh >> backups/backup.log 2>&1` |
 | Восстановить | `gunzip -c backups/ФАЙЛ.sql.gz \| docker compose exec -T db psql -U app -d app` |
 | Логи | `docker compose logs -f --tail 100 bot backend` |
+| Здоровы ли контейнеры | `docker compose ps` (бот `unhealthy` = завис или 2+ минуты нет связи с Telegram/релеем) |
 | Что в базе | `docker compose exec backend python -m app.manage status` |
 | Новая ссылка для админа | `docker compose exec backend python -m app.manage admin-link` |
 | Есть ли связь с Telegram | `docker compose exec backend python -m app.manage check-telegram` |

@@ -17,6 +17,8 @@ from loguru import logger
 from .config import settings
 
 TIMEOUT = 10  # секунд на запрос к Telegram
+ALERT_AFTER = 5  # столько неудачных отправок подряд → одна строка ERROR в лог (она же уйдёт в Sentry)
+_fail_streak = 0
 _TOKEN_RE = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}")
 
 
@@ -42,6 +44,21 @@ def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=TIMEOUT)
 
 
+def _track(result: bool | None) -> bool | None:
+    """Считаем неудачи подряд (нет связи / релей / 5xx). Ответ Telegram 400/403 — связь есть, счётчик сбрасываем."""
+    global _fail_streak
+    if result is False:
+        _fail_streak += 1
+        if _fail_streak == ALERT_AFTER:  # ровно один раз за сбой — без спама
+            logger.error(f"Telegram недоступен: {ALERT_AFTER} отправок подряд не прошли. Проверьте релей и "
+                         "TELEGRAM_API_BASE: docker compose exec backend python -m app.manage check-telegram")
+    else:
+        if _fail_streak >= ALERT_AFTER:
+            logger.info(f"Связь с Telegram восстановлена (до этого не прошли {_fail_streak} отправок подряд)")
+        _fail_streak = 0
+    return result
+
+
 async def _call(method: str, payload: dict) -> bool | None:
     chat = payload.get("chat_id")
     if not chat:
@@ -53,18 +70,18 @@ async def _call(method: str, payload: dict) -> bool | None:
             r = await c.post(api_url(method), json=payload)
     except httpx.HTTPError as e:  # уведомление не должно ломать основной сценарий
         logger.warning(f"telegram {method} chat={chat}: нет связи с Telegram ({type(e).__name__}: {mask(str(e))})")
-        return False
+        return _track(False)
     if r.status_code == 200:
-        return True
+        return _track(True)
     try:
         desc = r.json().get("description", "")
     except ValueError:
         desc = "ответ не от Telegram (релей?)"
     if r.status_code in (400, 403):  # бот заблокирован, чат не найден, кривой текст — повтор не поможет
         logger.warning(f"telegram {method} chat={chat}: {r.status_code} {mask(desc)}")
-        return None
+        return _track(None)
     logger.warning(f"telegram {method} chat={chat}: {r.status_code} {mask(desc)}")
-    return False
+    return _track(False)
 
 
 async def send(chat_id: int | None, text: str, reply_markup: dict | None = None) -> bool | None:

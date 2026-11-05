@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 from telegram import BotCommandScopeDefault, Update
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, MessageHandler, PicklePersistence,
                           filters)
-from telegram.request import BaseRequest
+from telegram.request import BaseRequest, HTTPXRequest
 
 import config
 from api_client import api
@@ -19,6 +19,8 @@ from handlers.payments import decide
 from handlers.privacy import forget_ask, forget_yes, privacy
 from handlers.router import PATTERN, on_callback
 from handlers.start import CLIENT_COMMANDS, set_staff_commands, start_command
+from heartbeat import HEARTBEAT_EVERY, UpdatesRequest, beat
+from sentry_scrub import make_before_send, relay_secret
 
 logging.basicConfig(format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -36,6 +38,18 @@ GET_UPDATES_TIMEOUT = 10
 POST_INIT_TIMEOUT = 60
 # При старте ждём Telegram/релей бесконечно (повтор раз в секунду), а не падаем
 BOOTSTRAP_RETRIES = -1
+
+
+def sentry_options() -> dict:
+    """Sentry за рубежом: без ПДн (152-ФЗ) и без секретов. См. sentry_scrub.py."""
+    return dict(dsn=config.SENTRY_DSN, traces_sample_rate=0.0, send_default_pii=False, include_local_variables=False,
+                before_send=make_before_send(config.BOT_TOKEN, config.API_KEY, relay_secret(config.TELEGRAM_API_BASE)))
+
+
+def init_sentry() -> None:
+    if config.SENTRY_DSN:
+        import sentry_sdk
+        sentry_sdk.init(**sentry_options())
 
 
 async def _setup_menus(app: Application):
@@ -64,13 +78,14 @@ def build(request: BaseRequest | None = None, updates_request: BaseRequest | Non
     builder = (Application.builder().token(config.BOT_TOKEN)
                .base_url(f"{base}/bot").base_file_url(f"{base}/file/bot")  # PTB допишет токен
                .post_init(post_init))
-    if request:
-        builder = builder.request(request).get_updates_request(updates_request or request)
-    else:
-        builder = (builder.connect_timeout(CONNECT_TIMEOUT).read_timeout(READ_TIMEOUT)
-                   .write_timeout(WRITE_TIMEOUT).pool_timeout(POOL_TIMEOUT)
-                   .get_updates_connect_timeout(CONNECT_TIMEOUT).get_updates_read_timeout(GET_UPDATES_TIMEOUT)
-                   .get_updates_write_timeout(GET_UPDATES_TIMEOUT).get_updates_pool_timeout(POOL_TIMEOUT))
+    if request is None:
+        # пул соединений как у PTB по умолчанию: 256 на обычные запросы, 1 на getUpdates
+        request = HTTPXRequest(connection_pool_size=256, connect_timeout=CONNECT_TIMEOUT, read_timeout=READ_TIMEOUT,
+                               write_timeout=WRITE_TIMEOUT, pool_timeout=POOL_TIMEOUT)
+        updates_request = UpdatesRequest(connection_pool_size=1, connect_timeout=CONNECT_TIMEOUT,
+                                         read_timeout=GET_UPDATES_TIMEOUT, write_timeout=GET_UPDATES_TIMEOUT,
+                                         pool_timeout=POOL_TIMEOUT)  # помнит последний успешный getUpdates
+    builder = builder.request(request).get_updates_request(updates_request or request)
     if persistence:
         builder = builder.persistence(persistence)
     app = builder.build()
@@ -106,10 +121,13 @@ def build(request: BaseRequest | None = None, updates_request: BaseRequest | Non
     app.add_handler(MessageHandler(private & (filters.PHOTO | filters.Document.ALL), receipt))
     app.add_handler(MessageHandler(private & filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
+    if config.HEARTBEAT_FILE:  # для HEALTHCHECK в Docker
+        app.job_queue.run_repeating(beat, interval=HEARTBEAT_EVERY, first=5, name="heartbeat")
     return app
 
 
 def main():
+    init_sentry()
     build().run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False,
                         timeout=POLL_TIMEOUT, bootstrap_retries=BOOTSTRAP_RETRIES)
 

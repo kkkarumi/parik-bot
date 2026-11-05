@@ -1,5 +1,6 @@
 python-telegram-bot[job-queue]==22.8
 httpx==0.28.1
+sentry-sdk==2.73.0
 python-dotenv==1.2.4
 qrcode[pil]==8.2
 tzdata

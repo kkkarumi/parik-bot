@@ -51,13 +51,18 @@ async def _reminders(s, now: datetime) -> int:
             else:
                 b.reminded_24h = True
         if kind:
-            kb = None if b.client_confirmed else {"inline_keyboard": [[
-                {"text": "✅ Приду", "callback_data": f"rem_ok:{b.id}"},
-                {"text": "❌ Отменить", "callback_data": f"rem_cancel:{b.id}"}]]}
+            # отменить самому уже нельзя (CANCEL_BEFORE_MIN) — кнопку не показываем, даём телефон
+            can_cancel = not settings.cancel_before_min or left >= timedelta(minutes=settings.cancel_before_min)
+            buttons = [{"text": "✅ Приду", "callback_data": f"rem_ok:{b.id}"}]
+            if can_cancel:
+                buttons.append({"text": "❌ Отменить", "callback_data": f"rem_cancel:{b.id}"})
+            kb = None if b.client_confirmed else {"inline_keyboard": [buttons]}
             addr = f"\n📍 {esc(b.tenant.address)}" if b.tenant.address else ""
+            late = "" if can_cancel else (
+                "\n\nЕсли планы изменились, позвоните нам" + (f": {esc(b.tenant.phone)}" if b.tenant.phone else "."))
             ok = await notify.send(b.client.telegram_id,
                                    f"⏰ <b>Напоминание: запись {_relative(b, now)}</b>\n\n💇 {esc(b.master.name)}\n"
-                                   f"✂️ {esc(b.service.name)}\n📅 {bk.when(b)}{addr}", kb)
+                                   f"✂️ {esc(b.service.name)}\n📅 {bk.when(b)}{addr}{late}", kb)
             if ok is not False:  # доставлено или повторять бессмысленно (клиент заблокировал бота)
                 if kind == "2h":
                     b.reminded_2h = True

@@ -209,8 +209,14 @@ async def _own_booking(s: AsyncSession, t: Tenant, booking_id: int, telegram_id:
 async def cancel(booking_id: int, telegram_id: int, t: Tenant = Depends(get_tenant),
                  s: AsyncSession = Depends(get_session)):
     b = await _own_booking(s, t, booking_id, telegram_id)
-    if b.status not in ACTIVE_STATUSES or b.ends_at <= datetime.now(timezone.utc):
+    now = utcnow()
+    if b.status not in ACTIVE_STATUSES or b.ends_at <= now:
         raise HTTPException(409, "already " + b.status)
+    # политика отмены: подтверждённую запись клиент снимает сам не позже чем за CANCEL_BEFORE_MIN минут
+    # (неоплаченную бронь — всегда; мастер и админ отменяют через /staff без ограничений)
+    if (settings.cancel_before_min and b.status == "confirmed"
+            and b.starts_at - now < timedelta(minutes=settings.cancel_before_min)):
+        raise HTTPException(403, "too late to cancel")
     await bk.cancel(s, b, "client")
     return bk.booking_out(b)
 

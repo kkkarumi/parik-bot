@@ -86,7 +86,7 @@ docker compose exec backend python -m app.manage check-telegram
 | Есть ли связь с Telegram | `docker compose exec backend python -m app.manage check-telegram` |
 | Перезапуск | `docker compose restart` |
 
-Настройки в `.env` (см. `.env.example`): адрес Telegram API / релея (`TELEGRAM_API_BASE`), шаг сетки времени, горизонт записи, лимит активных записей на клиента, время ожидания чека.
+Настройки в `.env` (см. `.env.example`): адрес Telegram API / релея (`TELEGRAM_API_BASE`), шаг сетки времени, горизонт записи, лимит активных записей на клиента, время ожидания чека, за сколько минут до начала закрывается запись (`MIN_LEAD_MIN`, рекомендуем 60) и до какого момента клиент может отменить сам (`CANCEL_BEFORE_MIN`, рекомендуем 120; позже бот просит позвонить, мастер и админ отменяют всегда). По умолчанию оба 0 — как раньше. После правки `.env`: `docker compose up -d`.
 
 ## Локальный запуск (Mac/Linux, без Docker)
 

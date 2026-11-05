@@ -39,6 +39,12 @@ def day_label(d: date) -> str:
     return f"{WD[d.weekday()]} {d:%d.%m}"
 
 
+def duration(minutes: int) -> str:
+    """120 → «2 ч», 90 → «1 ч 30 мин», 45 → «45 мин»."""
+    h, m = divmod(int(minutes), 60)
+    return " ".join(p for p in (f"{h} ч" if h else "", f"{m} мин" if m else "") if p) or "0 мин"
+
+
 def rows(buttons: list, n: int) -> list[list]:
     return [buttons[i:i + n] for i in range(0, len(buttons), n)]
 

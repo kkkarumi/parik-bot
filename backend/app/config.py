@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]  # корень проекта, там лежит .env
@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     max_active_bookings: int = 3     # сколько будущих записей может держать один клиент
     prepay_timeout_min: int = 30     # сколько ждать чек о предоплате, потом бронь снимается
     review_window_hours: int = 24    # не просить отзыв о визитах старше этого (после простоя)
+    # за сколько минут до начала слот закрывается для записи (0 = можно записаться до самого начала)
+    min_lead_min: int = Field(0, ge=0)
+    # до скольких минут до визита клиент может отменить запись сам (0 = без ограничения).
+    # Мастер и админ отменяют всегда. Ровно за N минут отменить ещё можно.
+    cancel_before_min: int = Field(0, ge=0)
 
     @field_validator("telegram_api_base")
     @classmethod

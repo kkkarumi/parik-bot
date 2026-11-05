@@ -12,11 +12,11 @@ import config
 from api_client import ApiError, api
 from handlers.common import get_role
 from legal import render, salon_values
-from ui import Btn, ack, day_label, e, hhmm, kb, main_menu, rows, show, when
+from ui import Btn, ack, day_label, duration, e, hhmm, kb, main_menu, rows, show, when
 
 SERVICE, MASTER, DAY, SLOT, PHONE, CONFIRM, CONSENT = range(7)  # новые состояния — только в конец (state.pickle)
 CANCEL = [Btn("✖️ Отменить запись", callback_data="cancel_booking")]
-FLOW_KEYS = ("services", "service", "masters", "master", "slots", "starts_at", "single_master")
+FLOW_KEYS = ("services", "service", "masters", "master", "slots", "starts_at", "single_master", "cancel_before_min")
 
 
 async def _menu(update: Update, text: str):
@@ -188,8 +188,11 @@ async def ask_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     salon = await api.get("/salon")
     prepay = (f"\n\n💳 Нужна предоплата <b>{salon['prepay_amount']}₽</b> — реквизиты пришлю после подтверждения."
               if salon.get("prepay_amount") else "")
+    d["cancel_before_min"] = salon.get("cancel_before_min") or 0
+    rule = (f"\n\nℹ️ Отменить запись самому можно не позже чем за {duration(d['cancel_before_min'])} до визита."
+            if d["cancel_before_min"] else "")
     text = (f"📋 <b>Проверьте запись:</b>\n\n✂️ {e(d['service']['name'])} — {d['service']['price']}₽\n"
-            f"👤 {e(d['master']['name'])}\n📅 {when(d['starts_at'])}\n📞 {e(d['client']['phone'])}{prepay}")
+            f"👤 {e(d['master']['name'])}\n📅 {when(d['starts_at'])}\n📞 {e(d['client']['phone'])}{prepay}{rule}")
     await show(update, text, kb([Btn("✅ Всё верно, записаться", callback_data="confirm_yes")],
                                 [Btn("🔙 Другое время", callback_data="back_days")], CANCEL),
                new=update.callback_query is None)
@@ -225,9 +228,11 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if b["status"] == "pending_payment":
         await show(update, payment_text(b), kb([Btn("🗂 Мои записи", callback_data="menu_profile")]))
     else:
+        limit = d.pop("cancel_before_min", 0)
+        until = f" не позже чем за {duration(limit)} до визита" if limit else ""
         await _menu(update, f"🎉 <b>Вы записаны!</b>\n\n✂️ {e(b['service_name'])}\n👤 {e(b['master_name'])}\n"
                             f"📅 {when(b['starts_at'])}\n\nНапомню за день и за 2 часа до визита. "
-                            "Отменить можно в «Мои записи».")
+                            f"Отменить можно в «Мои записи»{until}.")
     return ConversationHandler.END
 
 

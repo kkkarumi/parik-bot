@@ -267,6 +267,14 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def forget_in_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """«Удалить мои данные» посреди записи: удаляем и выходим из диалога (данных для записи больше нет)."""
+    from handlers.privacy import forget_yes
+    await _drop_flow(update, context)
+    await forget_yes(update, context)
+    return ConversationHandler.END
+
+
 async def timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for k in FLOW_KEYS:
         context.user_data.pop(k, None)
@@ -301,6 +309,7 @@ def _build() -> ConversationHandler:
             ConversationHandler.TIMEOUT: [CallbackQueryHandler(timeout), MessageHandler(filters.ALL, timeout)],
         },
         fallbacks=[CallbackQueryHandler(cancel_booking, pattern=r"^cancel_booking$"),
+                   CallbackQueryHandler(forget_in_flow, pattern=r"^forget_yes$"),
                    CommandHandler("cancel", cancel_booking),
                    CommandHandler("start", restart)],
         allow_reentry=True,

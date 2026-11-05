@@ -149,3 +149,16 @@ def test_consent_text_fits_message():
 def test_render_escapes_html():
     text = legal.render("consent.md", salon="<b>X&Y</b>", contact="1", address="2")
     assert "&lt;b&gt;X&amp;Y&lt;/b&gt;" in text and "<b>Согласие" in text
+
+
+async def test_forget_in_the_middle_of_booking(h):
+    c = h.chat(CLIENT, "Иван")
+    await c.send("/start")
+    await c.open_booking()
+    await c.press(c.button("Стрижка"))
+    await c.send("/forget")
+    await c.press("forget_yes")
+    assert "Ваши данные удалены" in c.last_text()
+    await c.press("mst:1")  # кнопка из прерванной записи
+    assert "Главное меню" in c.last_text()  # «устаревшая кнопка», а не ошибка
+    assert not any("пошло не так" in t for t in c.texts())

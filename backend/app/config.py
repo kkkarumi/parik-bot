@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     # до скольких минут до визита клиент может отменить запись сам (0 = без ограничения).
     # Мастер и админ отменяют всегда. Ровно за N минут отменить ещё можно.
     cancel_before_min: int = Field(0, ge=0)
+    # демо-бот для показа клиентам: разрешён manage reset-demo, рассылка по клиентам выключена
+    demo_mode: bool = False
 
     @field_validator("telegram_api_base")
     @classmethod

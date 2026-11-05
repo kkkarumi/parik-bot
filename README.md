@@ -76,9 +76,12 @@ docker compose exec backend python -m app.manage check-telegram
 | Что | Команда |
 |---|---|
 | Обновить до новой версии (с бэкапом) | `./scripts/update.sh` |
-| Бэкап базы | `./scripts/backup.sh` → `backups/*.sql.gz` (хранятся 14 последних) |
-| Ежедневный бэкап | `crontab -e` → `15 4 * * * cd /root/salon-parik && ./scripts/backup.sh >> backups/backup.log 2>&1` |
+| Бэкап базы | `./scripts/backup.sh` → `backups/*.sql.gz` (хранятся 14 последних; при `BACKUP_REMOTE` в `.env` — ещё и копия во внешнее хранилище через rclone) |
+| Ежедневный бэкап (и пинг мониторинга, и сброс демо) | `./scripts/install-cron.sh` — можно запускать повторно, дублей не будет |
+| Проверить, что бэкап восстанавливается | `./scripts/restore-test.sh` (временный Postgres, рабочую базу не трогает) |
 | Восстановить | `gunzip -c backups/ФАЙЛ.sql.gz \| docker compose exec -T db psql -U app -d app` |
+| Мониторинг «салон жив» | `HEARTBEAT_URL` в `.env` + `./scripts/install-cron.sh`, подробно — [scripts/deploy-checklist.md](scripts/deploy-checklist.md) |
+| Сбросить демо-бота | `docker compose exec backend python -m app.manage reset-demo` (только при `DEMO_MODE=1`) |
 | Логи | `docker compose logs -f --tail 100 bot backend` |
 | Здоровы ли контейнеры | `docker compose ps` (бот `unhealthy` = завис или 2+ минуты нет связи с Telegram/релеем) |
 | Что в базе | `docker compose exec backend python -m app.manage status` |

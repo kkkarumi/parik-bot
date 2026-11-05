@@ -73,3 +73,13 @@ async def test_master_no_show_and_foreign_booking(h):
     assert "не найдена" in t.last_text()
     await t.send("/admin")
     assert "только администратору" in t.last_text()
+
+
+async def test_broadcast_disabled_in_demo_mode(h, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "demo_mode", True)
+    a = h.chat(ADMIN, "Админ")
+    await a.press("a:bc")
+    assert "В демо-боте рассылка отключена" in a.last_text()
+    await a.press("a:bc_go")  # старая кнопка «Отправить» тоже ничего не шлёт
+    assert not any(n == "sendMessage" and p.get("chat_id") == CLIENT for n, p in h.tg.calls)

@@ -6,6 +6,8 @@
   admin-link  выдать новую ссылку для входа админа (старый админ остаётся до перехода по ссылке)
   status      что сейчас в базе
   check-telegram  проверить, достаёт ли сервер до Telegram (напрямую или через релей TELEGRAM_API_BASE)
+  reset-demo  сбросить демо-салон: удалить записи и клиентов, заново завести демо-услуги и мастеров
+              (работает только при DEMO_MODE=1 в .env — чтобы случайно не стереть боевой салон)
 """
 import asyncio
 import os
@@ -14,13 +16,14 @@ from urllib.parse import urlsplit
 
 import httpx
 from dotenv import load_dotenv
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from .admin_api import DEFAULT_HOURS, new_code
 from .config import ROOT, settings
 from .db import SessionLocal, engine
 from .migrate import upgrade_db
-from .models import Booking, Client, Master, MasterService, Service, Tenant, WorkingHours
+from .models import (Booking, Client, Master, MasterService, MasterTimeOff, Payment, Review, Service, Tenant,
+                     WorkingHours)
 from .notify import api_url, mask
 
 load_dotenv(ROOT / ".env")
@@ -114,21 +117,58 @@ async def demo():
             return print("Сначала: python -m app.manage init")
         if await s.scalar(select(func.count(Service.id)).where(Service.tenant_id == t.id)):
             return print("Услуги уже есть — демо не добавляю.")
-        svcs = [Service(tenant_id=t.id, name=n, price=p, duration_min=d, is_active=True)
-                for n, p, d in [("Мужская стрижка", 800, 60), ("Стрижка бороды", 500, 30),
-                                ("Стрижка + борода", 1200, 90), ("Детская стрижка", 600, 45)]]
-        masters = [Master(tenant_id=t.id, name=n, is_active=True) for n in ("Алим", "Тимур")]
-        s.add_all(svcs + masters)
-        await s.flush()
-        for m in masters:
-            for sv in svcs:
-                s.add(MasterService(master_id=m.id, service_id=sv.id))
-            for wd, a, b in DEFAULT_HOURS:
-                s.add(WorkingHours(master_id=m.id, weekday=wd, start_time=a, end_time=b))
-        t.address = t.address or "г. Нальчик, ул. Примерная, 1"
-        t.work_hours_text = t.work_hours_text or "Пн–Сб 10:00–20:00"
+        await _seed_demo(s, t)
         await s.commit()
         print("Демо-данные добавлены: 4 услуги, 2 мастера (Пн–Сб 10–20). Поменять — /admin в боте.")
+
+
+async def _seed_demo(s, t: Tenant) -> list[Master]:
+    svcs = [Service(tenant_id=t.id, name=n, price=p, duration_min=d, is_active=True)
+            for n, p, d in [("Мужская стрижка", 800, 60), ("Стрижка бороды", 500, 30),
+                            ("Стрижка + борода", 1200, 90), ("Детская стрижка", 600, 45)]]
+    masters = [Master(tenant_id=t.id, name=n, is_active=True) for n in ("Алим", "Тимур")]
+    s.add_all(svcs + masters)
+    await s.flush()
+    for m in masters:
+        for sv in svcs:
+            s.add(MasterService(master_id=m.id, service_id=sv.id))
+        for wd, a, b in DEFAULT_HOURS:
+            s.add(WorkingHours(master_id=m.id, weekday=wd, start_time=a, end_time=b))
+    t.address = t.address or "г. Нальчик, ул. Примерная, 1"
+    t.work_hours_text = t.work_hours_text or "Пн–Сб 10:00–20:00"
+    return masters
+
+
+async def reset_demo():
+    """Ночная чистка демо-бота: записи, клиенты, услуги и мастера → исходные демо-данные.
+    Настройки салона (название, адрес, админ, предоплата) не трогаем; мастера, привязанные к Telegram,
+    остаются привязанными (по имени), чтобы не рассылать приглашения заново."""
+    if not settings.demo_mode:
+        print("Отказ: reset-demo работает только при DEMO_MODE=1 в .env (защита от стирания боевого салона).")
+        raise SystemExit(1)
+    async with SessionLocal() as s:
+        t = await tenant(s)
+        if not t:
+            return print("Сначала: python -m app.manage init")
+        masters = (await s.scalars(select(Master).where(Master.tenant_id == t.id))).all()
+        links = {m.name: m.telegram_chat_id for m in masters if m.telegram_chat_id}
+        bookings = select(Booking.id).where(Booking.tenant_id == t.id)
+        mids = select(Master.id).where(Master.tenant_id == t.id)
+        n_b = await s.scalar(select(func.count()).select_from(bookings.subquery()))
+        n_c = await s.scalar(select(func.count(Client.id)).where(Client.tenant_id == t.id))
+        await s.execute(delete(Review).where(Review.booking_id.in_(bookings)))
+        await s.execute(delete(Payment).where(Payment.booking_id.in_(bookings)))
+        await s.execute(delete(Booking).where(Booking.tenant_id == t.id))
+        await s.execute(delete(Client).where(Client.tenant_id == t.id))
+        for model in (MasterTimeOff, WorkingHours, MasterService):
+            await s.execute(delete(model).where(model.master_id.in_(mids)))
+        await s.execute(delete(Master).where(Master.tenant_id == t.id))
+        await s.execute(delete(Service).where(Service.tenant_id == t.id))
+        for m in await _seed_demo(s, t):
+            m.telegram_chat_id = links.get(m.name)
+        await s.commit()
+        print(f"Демо сброшено: удалено записей {n_b}, клиентов {n_c}; заново 4 услуги и 2 мастера "
+              f"(привязано к Telegram: {sum(1 for n in links if n in ('Алим', 'Тимур'))}).")
 
 
 async def admin_link():
@@ -157,7 +197,7 @@ async def status():
 
 async def main(cmd: str):
     await upgrade_db()
-    await {"init": init, "demo": demo, "admin-link": admin_link, "status": status}[cmd]()
+    await {"init": init, "demo": demo, "admin-link": admin_link, "status": status, "reset-demo": reset_demo}[cmd]()
     await engine.dispose()
 
 
@@ -165,7 +205,7 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "check-telegram":  # база не нужна
         sys.exit(0 if check_telegram() else 1)
-    if cmd not in ("init", "demo", "admin-link", "status"):
+    if cmd not in ("init", "demo", "admin-link", "status", "reset-demo"):
         print(__doc__)
         sys.exit(1)
     asyncio.run(main(cmd))

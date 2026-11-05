@@ -7,6 +7,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import bookings as bk, notify
+from .config import settings
 from .db import get_session
 from .deps import require_admin
 from .models import (Booking, Client, Master, MasterService, MasterTimeOff, Payment, Review, Service,
@@ -247,7 +248,9 @@ async def search_clients(q: str, t: Tenant = Depends(require_admin), s: AsyncSes
 
 @router.get("/clients/ids", response_model=list[int])
 async def client_ids(t: Tenant = Depends(require_admin), s: AsyncSession = Depends(get_session)):
-    """Для рассылки: все незаблокированные клиенты."""
+    """Для рассылки: все незаблокированные клиенты. В демо-боте рассылки нет: там пишут случайные люди."""
+    if settings.demo_mode:
+        raise HTTPException(403, "broadcast is disabled in demo mode")
     return (await s.scalars(select(Client.telegram_id).where(
         Client.tenant_id == t.id, ~Client.is_blocked, Client.erased_at.is_(None)))).all()
 

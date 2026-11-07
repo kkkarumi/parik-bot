@@ -1,4 +1,4 @@
-"""Запись клиента: услуга → мастер → день → время → телефон → подтверждение (→ предоплата)."""
+"""Запись клиента: (согласие на ПДн) → услуга → мастер → день → время → телефон → подтверждение (→ предоплата)."""
 import re
 import warnings
 from datetime import date
@@ -11,11 +11,12 @@ from telegram.warnings import PTBUserWarning
 import config
 from api_client import ApiError, api
 from handlers.common import get_role
-from ui import Btn, ack, day_label, e, hhmm, kb, main_menu, rows, show, when
+from legal import render, salon_values
+from ui import Btn, ack, day_label, duration, e, hhmm, kb, main_menu, rows, show, when
 
-SERVICE, MASTER, DAY, SLOT, PHONE, CONFIRM = range(6)
+SERVICE, MASTER, DAY, SLOT, PHONE, CONFIRM, CONSENT = range(7)  # новые состояния — только в конец (state.pickle)
 CANCEL = [Btn("✖️ Отменить запись", callback_data="cancel_booking")]
-FLOW_KEYS = ("services", "service", "masters", "master", "slots", "starts_at", "single_master")
+FLOW_KEYS = ("services", "service", "masters", "master", "slots", "starts_at", "single_master", "cancel_before_min")
 
 
 async def _menu(update: Update, text: str):
@@ -32,7 +33,36 @@ async def start_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = q.from_user
     context.user_data["client"] = await api.put(
         "/clients", {"telegram_id": u.id, "username": u.username, "name": u.full_name})
+    if not context.user_data["client"].get("consent_at"):  # 152-ФЗ: сначала согласие (новые и «старые» клиенты)
+        return await ask_consent(update, context)
     return await show_services(update, context)
+
+
+async def ask_consent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    salon = await api.get("/salon")
+    await show(update, render("consent.md", **salon_values(salon)),
+               kb([Btn("✅ Согласен", callback_data="consent_yes")], [Btn("Отмена", callback_data="consent_no")]))
+    return CONSENT
+
+
+async def consent_given(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await ack(q, "Спасибо!")
+    d = context.user_data
+    d["client"] = await api.post("/clients/consent", telegram_id=q.from_user.id)
+    if all(k in d for k in ("service", "master", "starts_at")) and d["client"].get("phone"):
+        return await ask_confirm(update, context)  # согласие спросили на последнем шаге — продолжаем запись
+    return await show_services(update, context)
+
+
+async def consent_refused(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await ack(update.callback_query)
+    await _drop_flow(update, context)
+    salon = await api.get("/salon")
+    phone = f": {e(salon['phone'])}" if salon.get("phone") else "."
+    await _menu(update, "Без согласия на обработку данных записаться через бота нельзя. "
+                        f"Можно записаться по телефону{phone}")
+    return ConversationHandler.END
 
 
 async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -158,8 +188,11 @@ async def ask_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     salon = await api.get("/salon")
     prepay = (f"\n\n💳 Нужна предоплата <b>{salon['prepay_amount']}₽</b> — реквизиты пришлю после подтверждения."
               if salon.get("prepay_amount") else "")
+    d["cancel_before_min"] = salon.get("cancel_before_min") or 0
+    rule = (f"\n\nℹ️ Отменить запись самому можно не позже чем за {duration(d['cancel_before_min'])} до визита."
+            if d["cancel_before_min"] else "")
     text = (f"📋 <b>Проверьте запись:</b>\n\n✂️ {e(d['service']['name'])} — {d['service']['price']}₽\n"
-            f"👤 {e(d['master']['name'])}\n📅 {when(d['starts_at'])}\n📞 {e(d['client']['phone'])}{prepay}")
+            f"👤 {e(d['master']['name'])}\n📅 {when(d['starts_at'])}\n📞 {e(d['client']['phone'])}{prepay}{rule}")
     await show(update, text, kb([Btn("✅ Всё верно, записаться", callback_data="confirm_yes")],
                                 [Btn("🔙 Другое время", callback_data="back_days")], CANCEL),
                new=update.callback_query is None)
@@ -178,6 +211,8 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show(update, "⚠️ Это время только что заняли. Выберите другое 👇",
                        kb([Btn("📅 Выбрать время", callback_data="back_days")], CANCEL))
             return DAY
+        if err.status == 428:  # согласие отозвано, пока шла запись
+            return await ask_consent(update, context)
         if err.status == 429:
             await _menu(update, "⚠️ У вас уже несколько активных записей. Отмените ненужную в «Мои записи» "
                                 "или дождитесь визита.")
@@ -193,9 +228,11 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if b["status"] == "pending_payment":
         await show(update, payment_text(b), kb([Btn("🗂 Мои записи", callback_data="menu_profile")]))
     else:
+        limit = d.pop("cancel_before_min", 0)
+        until = f" не позже чем за {duration(limit)} до визита" if limit else ""
         await _menu(update, f"🎉 <b>Вы записаны!</b>\n\n✂️ {e(b['service_name'])}\n👤 {e(b['master_name'])}\n"
                             f"📅 {when(b['starts_at'])}\n\nНапомню за день и за 2 часа до визита. "
-                            "Отменить можно в «Мои записи».")
+                            f"Отменить можно в «Мои записи»{until}.")
     return ConversationHandler.END
 
 
@@ -230,6 +267,14 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def forget_in_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """«Удалить мои данные» посреди записи: удаляем и выходим из диалога (данных для записи больше нет)."""
+    from handlers.privacy import forget_yes
+    await _drop_flow(update, context)
+    await forget_yes(update, context)
+    return ConversationHandler.END
+
+
 async def timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for k in FLOW_KEYS:
         context.user_data.pop(k, None)
@@ -259,9 +304,12 @@ def _build() -> ConversationHandler:
             PHONE: [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), phone_received)],
             CONFIRM: [CallbackQueryHandler(confirm_booking, pattern=r"^confirm_yes$"),
                       CallbackQueryHandler(show_days, pattern=r"^back_days$")],
+            CONSENT: [CallbackQueryHandler(consent_given, pattern=r"^consent_yes$"),
+                      CallbackQueryHandler(consent_refused, pattern=r"^consent_no$")],
             ConversationHandler.TIMEOUT: [CallbackQueryHandler(timeout), MessageHandler(filters.ALL, timeout)],
         },
         fallbacks=[CallbackQueryHandler(cancel_booking, pattern=r"^cancel_booking$"),
+                   CallbackQueryHandler(forget_in_flow, pattern=r"^forget_yes$"),
                    CommandHandler("cancel", cancel_booking),
                    CommandHandler("start", restart)],
         allow_reentry=True,

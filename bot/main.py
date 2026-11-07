@@ -1,8 +1,11 @@
+import asyncio
 import logging
+from urllib.parse import urlsplit
 
 from telegram import BotCommandScopeDefault, Update
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, MessageHandler, PicklePersistence,
                           filters)
+from telegram.request import BaseRequest, HTTPXRequest
 
 import config
 from api_client import api
@@ -13,32 +16,76 @@ from handlers.client import (cancel_ask, cancel_no, cancel_yes, rate, receipt, r
 from handlers.common import ask_cancel, on_error, on_text, stale_button
 from handlers.info import back_to_menu, show_contacts, show_portfolio, show_price
 from handlers.payments import decide
+from handlers.privacy import forget_ask, forget_yes, privacy
 from handlers.router import PATTERN, on_callback
 from handlers.start import CLIENT_COMMANDS, set_staff_commands, start_command
+from heartbeat import HEARTBEAT_EVERY, UpdatesRequest, beat
+from sentry_scrub import make_before_send, relay_secret
 
 logging.basicConfig(format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
 
+# Таймауты запросов к Telegram, секунды. Через релей за границей ответ бывает медленнее, чем напрямую.
+CONNECT_TIMEOUT = 10
+READ_TIMEOUT = 20
+WRITE_TIMEOUT = 20
+POOL_TIMEOUT = 10
+# getUpdates (long polling): Telegram держит запрос до POLL_TIMEOUT с, PTB прибавляет его к read-таймауту
+POLL_TIMEOUT = 10
+GET_UPDATES_TIMEOUT = 10
+# post_init — меню команд и описание бота. Не критично: не держим старт дольше этого
+POST_INIT_TIMEOUT = 60
+# При старте ждём Telegram/релей бесконечно (повтор раз в секунду), а не падаем
+BOOTSTRAP_RETRIES = -1
+
+
+def sentry_options() -> dict:
+    """Sentry за рубежом: без ПДн (152-ФЗ) и без секретов. См. sentry_scrub.py."""
+    return dict(dsn=config.SENTRY_DSN, traces_sample_rate=0.0, send_default_pii=False, include_local_variables=False,
+                before_send=make_before_send(config.BOT_TOKEN, config.API_KEY, relay_secret(config.TELEGRAM_API_BASE)))
+
+
+def init_sentry() -> None:
+    if config.SENTRY_DSN:
+        import sentry_sdk
+        sentry_sdk.init(**sentry_options())
+
+
+async def _setup_menus(app: Application):
+    await app.bot.set_my_commands(CLIENT_COMMANDS, scope=BotCommandScopeDefault())
+    ids = await api.get("/staff/ids")
+    for chat_id in ids["masters"]:
+        await set_staff_commands(app.bot, chat_id, "master")
+    if ids["admin"]:
+        await set_staff_commands(app.bot, ids["admin"], "admin")
+    salon = await api.get("/salon")
+    await app.bot.set_my_short_description(f"Онлайн-запись в «{salon['name']}» — без звонков, 24/7")
+
 
 async def post_init(app: Application):
-    await app.bot.set_my_commands(CLIENT_COMMANDS, scope=BotCommandScopeDefault())
     try:
-        ids = await api.get("/staff/ids")
-        for chat_id in ids["masters"]:
-            await set_staff_commands(app.bot, chat_id, "master")
-        if ids["admin"]:
-            await set_staff_commands(app.bot, ids["admin"], "admin")
-        salon = await api.get("/salon")
-        await app.bot.set_my_short_description(f"Онлайн-запись в «{salon['name']}» — без звонков, 24/7")
-    except Exception as err:
-        log.warning("post_init: %s", err)
-    log.info("bot @%s started", app.bot.username)
+        await asyncio.wait_for(_setup_menus(app), POST_INIT_TIMEOUT)
+    except Exception as err:  # Telegram/API недоступны — бот всё равно запускается, меню обновится при рестарте
+        log.warning("post_init: %r", err)
+    log.info("bot @%s started (Telegram API: %s)", app.bot.username, urlsplit(config.TELEGRAM_API_BASE).netloc)
 
 
-def build() -> Application:
+def build(request: BaseRequest | None = None, updates_request: BaseRequest | None = None) -> Application:
+    """request/updates_request — только для тестов (фейковый Telegram)."""
     persistence = PicklePersistence(filepath=config.STATE_FILE) if config.STATE_FILE else None
-    builder = Application.builder().token(config.BOT_TOKEN).post_init(post_init)
+    base = config.TELEGRAM_API_BASE
+    builder = (Application.builder().token(config.BOT_TOKEN)
+               .base_url(f"{base}/bot").base_file_url(f"{base}/file/bot")  # PTB допишет токен
+               .post_init(post_init))
+    if request is None:
+        # пул соединений как у PTB по умолчанию: 256 на обычные запросы, 1 на getUpdates
+        request = HTTPXRequest(connection_pool_size=256, connect_timeout=CONNECT_TIMEOUT, read_timeout=READ_TIMEOUT,
+                               write_timeout=WRITE_TIMEOUT, pool_timeout=POOL_TIMEOUT)
+        updates_request = UpdatesRequest(connection_pool_size=1, connect_timeout=CONNECT_TIMEOUT,
+                                         read_timeout=GET_UPDATES_TIMEOUT, write_timeout=GET_UPDATES_TIMEOUT,
+                                         pool_timeout=POOL_TIMEOUT)  # помнит последний успешный getUpdates
+    builder = builder.request(request).get_updates_request(updates_request or request)
     if persistence:
         builder = builder.persistence(persistence)
     app = builder.build()
@@ -49,12 +96,17 @@ def build() -> Application:
     app.add_handler(CommandHandler("admin", admin.admin_cmd, filters=private))
     app.add_handler(CommandHandler("schedule", staff.schedule_cmd, filters=private))
     app.add_handler(CommandHandler("myid", staff.myid, filters=private))
+    app.add_handler(CommandHandler("privacy", privacy, filters=private))
+    app.add_handler(CommandHandler("forget", forget_ask, filters=private))
 
     app.add_handler(CallbackQueryHandler(back_to_menu, pattern=r"^back_to_menu$"))
     app.add_handler(CallbackQueryHandler(show_price, pattern=r"^menu_price$"))
     app.add_handler(CallbackQueryHandler(show_portfolio, pattern=r"^menu_portfolio$"))
     app.add_handler(CallbackQueryHandler(show_contacts, pattern=r"^menu_contacts$"))
     app.add_handler(CallbackQueryHandler(show_profile, pattern=r"^menu_profile$"))
+    app.add_handler(CallbackQueryHandler(privacy, pattern=r"^menu_privacy$"))
+    app.add_handler(CallbackQueryHandler(forget_ask, pattern=r"^forget_ask$"))
+    app.add_handler(CallbackQueryHandler(forget_yes, pattern=r"^forget_yes$"))
     app.add_handler(CallbackQueryHandler(cancel_ask, pattern=r"^cancel_id:\d+$"))
     app.add_handler(CallbackQueryHandler(cancel_yes, pattern=r"^cancel_yes:\d+$"))
     app.add_handler(CallbackQueryHandler(cancel_no, pattern=r"^cancel_no:\d+$"))
@@ -69,11 +121,15 @@ def build() -> Application:
     app.add_handler(MessageHandler(private & (filters.PHOTO | filters.Document.ALL), receipt))
     app.add_handler(MessageHandler(private & filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
+    if config.HEARTBEAT_FILE:  # для HEALTHCHECK в Docker
+        app.job_queue.run_repeating(beat, interval=HEARTBEAT_EVERY, first=5, name="heartbeat")
     return app
 
 
 def main():
-    build().run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+    init_sentry()
+    build().run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False,
+                        timeout=POLL_TIMEOUT, bootstrap_retries=BOOTSTRAP_RETRIES)
 
 
 if __name__ == "__main__":

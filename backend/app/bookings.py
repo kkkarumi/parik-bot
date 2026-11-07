@@ -59,8 +59,9 @@ async def announce_new(b: Booking) -> None:
         await to_staff(b, card(b, "🔔 <b>Новая запись</b>"))
 
 
-async def cancel(s: AsyncSession, b: Booking, by: str, actor_chat_id: int | None = None) -> None:
-    """by: client | staff | system. Уведомляет «другую сторону»."""
+async def cancel(s: AsyncSession, b: Booking, by: str, actor_chat_id: int | None = None,
+                 title: str = "❌ <b>Клиент отменил запись</b>") -> None:
+    """by: client | staff | system. Уведомляет «другую сторону». title — заголовок для салона, если отменил клиент."""
     b.status, b.cancelled_by = "cancelled", by
     for p in (await s.scalars(select(Payment).where(
             Payment.booking_id == b.id, Payment.status.in_(("awaiting", "pending"))))).all():
@@ -68,7 +69,7 @@ async def cancel(s: AsyncSession, b: Booking, by: str, actor_chat_id: int | None
     await s.commit()
 
     if by == "client":
-        await to_staff(b, card(b, "❌ <b>Клиент отменил запись</b>"))
+        await to_staff(b, card(b, title))
     elif by == "staff":
         await notify.send(b.client.telegram_id,
                           f"⚠️ <b>Ваша запись отменена салоном</b>\n\n💇 {esc(b.master.name)}\n"

@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +13,7 @@ from .config import settings
 from .db import get_session
 from .deps import get_tenant
 from .models import (ACTIVE_STATUSES, Booking, Client, Master, MasterService, Payment, Review,
-                     Service, Tenant)
+                     Service, Tenant, utcnow)
 from .notify import esc
 from .schemas import (BookingIn, BookingOut, ClientIn, ClientOut, MasterOut, ReceiptIn, ReviewIn,
                       SalonOut, ServiceOut)
@@ -89,6 +89,56 @@ async def upsert_client(data: ClientIn, t: Tenant = Depends(get_tenant), s: Asyn
     return c
 
 
+async def _client_by_tg(s: AsyncSession, t: Tenant, telegram_id: int) -> Client | None:
+    return await s.scalar(select(Client).where(Client.tenant_id == t.id, Client.telegram_id == telegram_id))
+
+
+@router.get("/clients/me", response_model=ClientOut)
+async def client_me(telegram_id: int, t: Tenant = Depends(get_tenant), s: AsyncSession = Depends(get_session)):
+    c = await _client_by_tg(s, t, telegram_id)
+    if not c:
+        raise HTTPException(404)
+    return c
+
+
+@router.post("/clients/consent", response_model=ClientOut)
+async def client_consent(telegram_id: int, t: Tenant = Depends(get_tenant), s: AsyncSession = Depends(get_session)):
+    """Клиент нажал «Согласен» (152-ФЗ). Дата первого согласия сохраняется."""
+    c = await _client_by_tg(s, t, telegram_id)
+    if not c:
+        raise HTTPException(404)
+    if c.consent_at is None:
+        c.consent_at = utcnow()
+        await s.commit()
+    return c
+
+
+ERASED_NAME = "Удалён"
+
+
+@router.post("/clients/forget")
+async def client_forget(telegram_id: int, t: Tenant = Depends(get_tenant),
+                        s: AsyncSession = Depends(get_session)) -> dict:
+    """Отзыв согласия (/forget): стираем ПДн, снимаем будущие записи с уведомлением салону.
+    История визитов и статистика остаются, но без имени, телефона и Telegram ID."""
+    c = await _client_by_tg(s, t, telegram_id)
+    if not c:
+        return {"ok": True, "cancelled": 0}
+    now = utcnow()
+    future = (await s.scalars(select(Booking.id).where(
+        Booking.client_id == c.id, Booking.status.in_(ACTIVE_STATUSES), Booking.starts_at > now))).all()
+    c.name, c.username, c.phone, c.notes = ERASED_NAME, None, None, None
+    c.telegram_id = -c.id  # настоящие ID пользователей Telegram положительные — коллизий нет
+    c.consent_at, c.erased_at = None, now
+    await s.execute(update(Payment).where(Payment.booking_id.in_(select(Booking.id).where(
+        Booking.client_id == c.id))).values(receipt_file_id=None))  # скрин чека тоже ПДн
+    await s.commit()
+    for bid in future:
+        b = await bk.reload(s, bid)
+        await bk.cancel(s, b, "client", title="🗑 <b>Клиент удалил свои данные — запись отменена</b>")
+    return {"ok": True, "cancelled": len(future)}
+
+
 # ---------- записи ----------
 @router.post("/bookings", response_model=BookingOut, status_code=201)
 async def create_booking(data: BookingIn, t: Tenant = Depends(get_tenant), s: AsyncSession = Depends(get_session)):
@@ -102,6 +152,8 @@ async def create_booking(data: BookingIn, t: Tenant = Depends(get_tenant), s: As
             raise HTTPException(404)
         if client.is_blocked:
             raise HTTPException(403, "client is blocked")
+        if client.consent_at is None:  # 152-ФЗ: без согласия на обработку ПДн не записываем
+            raise HTTPException(428, "consent required")
         if not await s.scalar(select(MasterService.master_id).where(
                 MasterService.master_id == master.id, MasterService.service_id == service.id)):
             raise HTTPException(409, "master does not provide this service")
@@ -157,8 +209,14 @@ async def _own_booking(s: AsyncSession, t: Tenant, booking_id: int, telegram_id:
 async def cancel(booking_id: int, telegram_id: int, t: Tenant = Depends(get_tenant),
                  s: AsyncSession = Depends(get_session)):
     b = await _own_booking(s, t, booking_id, telegram_id)
-    if b.status not in ACTIVE_STATUSES or b.ends_at <= datetime.now(timezone.utc):
+    now = utcnow()
+    if b.status not in ACTIVE_STATUSES or b.ends_at <= now:
         raise HTTPException(409, "already " + b.status)
+    # политика отмены: подтверждённую запись клиент снимает сам не позже чем за CANCEL_BEFORE_MIN минут
+    # (неоплаченную бронь — всегда; мастер и админ отменяют через /staff без ограничений)
+    if (settings.cancel_before_min and b.status == "confirmed"
+            and b.starts_at - now < timedelta(minutes=settings.cancel_before_min)):
+        raise HTTPException(403, "too late to cancel")
     await bk.cancel(s, b, "client")
     return bk.booking_out(b)
 
@@ -209,4 +267,4 @@ async def receipt(booking_id: int, telegram_id: int, data: ReceiptIn, t: Tenant 
                                {"text": "❌ Отклонить", "callback_data": f"pay_no:{p.id}"}]]}
     sent = await notify.send_file(t.admin_chat_id, data.file_id, data.kind,
                                   bk.card(b, f"💳 <b>Чек о предоплате {p.amount}₽</b>"), kb)
-    return {"ok": True, "delivered": sent}
+    return {"ok": True, "delivered": bool(sent)}

@@ -503,9 +503,26 @@ async def find_run(update: Update, context: ContextTypes.DEFAULT_TYPE, a: dict):
 
 
 # ======================= рассылка =======================
+DEMO_NO_BROADCAST = "📣 В демо-боте рассылка отключена: сюда пишут случайные люди, которым вы показываете бота."
+
+
+async def _broadcast_ids(update: Update) -> list[int] | None:
+    """Кому слать рассылку. None — рассылка запрещена (демо-режим), сообщение уже показано."""
+    try:
+        return await _a(update, "GET", "/admin/clients/ids")
+    except ApiError as err:
+        if err.status == 403 and "demo" in err.detail:
+            await show(update, DEMO_NO_BROADCAST, kb([Btn("🔙 Админка", callback_data="a:menu")]), new=True)
+            return None
+        raise
+
+
 @screen("a:bc")
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    n = len(await _a(update, "GET", "/admin/clients/ids"))
+    ids = await _broadcast_ids(update)
+    if ids is None:
+        return
+    n = len(ids)
     await ask(update, context, "bc", f"📣 <b>Рассылка</b> — получат {n} клиентов.\n\nНапишите текст сообщения "
                                      "(акция, свободные окна, новости). Перед отправкой покажу превью.",
               back="a:menu")
@@ -514,7 +531,10 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @on_ask("bc")
 async def broadcast_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, a: dict):
     context.user_data["bc_text"] = update.message.text_html[:3500]
-    n = len(await _a(update, "GET", "/admin/clients/ids"))
+    ids = await _broadcast_ids(update)
+    if ids is None:
+        return
+    n = len(ids)
     await update.message.reply_text("👀 <b>Так увидят клиенты:</b>", parse_mode="HTML")
     await update.message.reply_text(context.user_data["bc_text"], parse_mode="HTML",
                                     reply_markup=kb([Btn("📅 Записаться", callback_data="menu_book")]))
@@ -527,7 +547,9 @@ async def broadcast_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = context.user_data.pop("bc_text", None)
     if not text:
         return await menu(update, context)
-    ids = await _a(update, "GET", "/admin/clients/ids")
+    ids = await _broadcast_ids(update)
+    if ids is None:
+        return
     await show(update, f"📤 Отправляю {len(ids)} клиентам…")
     ok = fail = 0
     markup = kb([Btn("📅 Записаться", callback_data="menu_book")])

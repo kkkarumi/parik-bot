@@ -76,8 +76,10 @@ async def salon():
         for m in (m1, m2):
             for wd in range(7):
                 s.add(WorkingHours(master_id=m.id, weekday=wd, start_time=time(10), end_time=time(20)))
-        c1 = Client(tenant_id=t.id, telegram_id=501, name="Иван", username="ivan", phone="+7 (928) 111-22-33")
-        c2 = Client(tenant_id=t.id, telegram_id=502, name="Аслан", phone="+79282223344")
+        agreed = datetime.now(timezone.utc)
+        c1 = Client(tenant_id=t.id, telegram_id=501, name="Иван", username="ivan", phone="+7 (928) 111-22-33",
+                    consent_at=agreed)
+        c2 = Client(tenant_id=t.id, telegram_id=502, name="Аслан", phone="+79282223344", consent_at=agreed)
         s.add_all([c1, c2])
         await s.commit()
         return {"t": t.id, "cut": cut.id, "beard": beard.id, "combo": combo.id, "m1": m1.id, "m2": m2.id,

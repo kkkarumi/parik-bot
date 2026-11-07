@@ -50,6 +50,10 @@ async def _cancel(update: Update, booking_id: str):
     except ApiError as err:
         if err.status in (404, 409):
             return await show(update, "⚠️ Эта запись уже отменена или прошла.")
+        if err.status == 403:  # политика отмены салона (CANCEL_BEFORE_MIN)
+            salon = await api.get("/salon")
+            phone = f": {e(salon['phone'])}" if salon.get("phone") else " в салон."
+            return await show(update, f"⚠️ Отмена так близко к визиту невозможна, позвоните{phone}")
         raise
     await show(update, f"🗑 Запись на {when(b['starts_at'])} отменена. Мастер предупреждён.\n"
                        "Записаться на другое время: /start")

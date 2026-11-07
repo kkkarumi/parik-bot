@@ -39,6 +39,12 @@ def day_label(d: date) -> str:
     return f"{WD[d.weekday()]} {d:%d.%m}"
 
 
+def duration(minutes: int) -> str:
+    """120 → «2 ч», 90 → «1 ч 30 мин», 45 → «45 мин»."""
+    h, m = divmod(int(minutes), 60)
+    return " ".join(p for p in (f"{h} ч" if h else "", f"{m} мин" if m else "") if p) or "0 мин"
+
+
 def rows(buttons: list, n: int) -> list[list]:
     return [buttons[i:i + n] for i in range(0, len(buttons), n)]
 
@@ -50,7 +56,8 @@ def kb(*rows_) -> Markup:
 def main_menu(role: str | None = None, is_master: bool = False) -> Markup:
     r = [[Btn("📅 Записаться", callback_data="menu_book")],
          [Btn("🗂 Мои записи", callback_data="menu_profile"), Btn("💰 Прайс", callback_data="menu_price")],
-         [Btn("📸 Наши работы", callback_data="menu_portfolio"), Btn("📞 Контакты", callback_data="menu_contacts")]]
+         [Btn("📸 Наши работы", callback_data="menu_portfolio"), Btn("📞 Контакты", callback_data="menu_contacts")],
+         [Btn("🔒 Мои данные", callback_data="menu_privacy")]]
     if role == "admin":
         r.append([Btn("📋 Записи клиентов", callback_data="up:0"), Btn("⚙️ Админка", callback_data="a:menu")])
         if is_master:

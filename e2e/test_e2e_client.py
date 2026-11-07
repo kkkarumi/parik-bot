@@ -7,7 +7,7 @@ from e2e.conftest import ADMIN, CLIENT, MASTER1, tomorrow
 
 async def _book(chat, *, master="Алим", time="12:00", phone_contact="+79281112233"):
     await chat.send("/start")
-    await chat.press("menu_book")
+    await chat.open_booking()
     assert "Выберите услугу" in chat.last_text()
     await chat.press(chat.button("Стрижка"))
     assert "Выберите мастера" in chat.last_text()
@@ -54,7 +54,7 @@ async def test_full_booking_flow(h):
 async def test_phone_typed_and_validated(h):
     c = h.chat(CLIENT, "Иван")
     await c.send("/start")
-    await c.press("menu_book")
+    await c.open_booking()
     await c.press(c.button("Борода"))
     await c.press(c.button("Тимур"))
     await c.press(f"day:{tomorrow()}")
@@ -69,7 +69,7 @@ async def test_slot_taken_meanwhile(h):
     c1, c2 = h.chat(CLIENT, "Иван"), h.chat(502, "Аслан")
     for c in (c1, c2):
         await c.send("/start")
-        await c.press("menu_book")
+        await c.open_booking()
         await c.press(c.button("Стрижка"))
         await c.press(c.button("Алим"))
         await c.press(f"day:{tomorrow()}")
@@ -86,7 +86,7 @@ async def test_slot_taken_meanwhile(h):
 async def test_back_navigation_and_cancel(h):
     c = h.chat(CLIENT, "Иван")
     await c.send("/start")
-    await c.press("menu_book")
+    await c.open_booking()
     await c.press(c.button("Стрижка"))
     await c.press("back_services")
     assert "Выберите услугу" in c.last_text()
@@ -176,7 +176,7 @@ async def test_reminder_buttons_and_rating(h):
 async def test_start_during_phone_step_resets(h):
     c = h.chat(CLIENT, "Иван")
     await c.send("/start")
-    await c.press("menu_book")
+    await c.open_booking()
     await c.press(c.button("Стрижка"))
     await c.press(c.button("Алим"))
     await c.press(f"day:{tomorrow()}")

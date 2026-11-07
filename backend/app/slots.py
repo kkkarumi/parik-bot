@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
-from .models import Booking, Master, MasterTimeOff, Service, Tenant, WorkingHours
+from .models import Booking, Master, MasterTimeOff, Service, Tenant, WorkingHours, utcnow
 
 
 def today(tenant: Tenant) -> date:
@@ -43,13 +43,14 @@ async def free_slots(session: AsyncSession, tenant: Tenant, master: Master,
 
     dur = timedelta(minutes=service.duration_min)
     step = timedelta(minutes=settings.slot_step_min)
-    now = datetime.now(tz)
+    # слот, до начала которого осталось MIN_LEAD_MIN минут или меньше, уже закрыт
+    cutoff = utcnow().astimezone(tz) + timedelta(minutes=settings.min_lead_min)
     out: set[datetime] = set()
     for h in hours:
         cur = datetime.combine(day, h.start_time, tzinfo=tz)
         end = datetime.combine(day, h.end_time, tzinfo=tz)
         while cur + dur <= end:
-            if cur > now and not any(cur < b_end and cur + dur > b_start for b_start, b_end in busy):
+            if cur > cutoff and not any(cur < b_end and cur + dur > b_start for b_start, b_end in busy):
                 out.add(cur)
             cur += step
     return sorted(out)

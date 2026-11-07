@@ -5,31 +5,81 @@
   demo        добавить демо-услуги и демо-мастеров (если их ещё нет)
   admin-link  выдать новую ссылку для входа админа (старый админ остаётся до перехода по ссылке)
   status      что сейчас в базе
+  check-telegram  проверить, достаёт ли сервер до Telegram (напрямую или через релей TELEGRAM_API_BASE)
+  reset-demo  сбросить демо-салон: удалить записи и клиентов, заново завести демо-услуги и мастеров
+              (работает только при DEMO_MODE=1 в .env — чтобы случайно не стереть боевой салон)
 """
 import asyncio
 import os
 import sys
+from urllib.parse import urlsplit
+
 import httpx
 from dotenv import load_dotenv
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from .admin_api import DEFAULT_HOURS, new_code
 from .config import ROOT, settings
 from .db import SessionLocal, engine
 from .migrate import upgrade_db
-from .models import Booking, Client, Master, MasterService, Service, Tenant, WorkingHours
+from .models import (Booking, Client, Master, MasterService, MasterTimeOff, Payment, Review, Service, Tenant,
+                     WorkingHours)
+from .notify import api_url, mask
 
 load_dotenv(ROOT / ".env")
+
+RELAY_HINT = ("Если сервер в РФ, настройте релей (relay/README.md) и впишите его адрес "
+              "в TELEGRAM_API_BASE в .env, затем: docker compose up -d")
+
+
+class TelegramUnreachable(Exception):
+    pass
+
+
+def get_me(timeout: float = 10) -> dict:
+    """getMe через TELEGRAM_API_BASE. Ошибка — TelegramUnreachable с понятной причиной (без токена)."""
+    if not settings.bot_token:
+        raise TelegramUnreachable("BOT_TOKEN не задан в .env")
+    try:
+        r = httpx.get(api_url("getMe"), timeout=timeout)
+    except httpx.TimeoutException:
+        raise TelegramUnreachable(f"нет ответа за {timeout:g} с (похоже на блокировку соединения)") from None
+    except httpx.HTTPError as e:
+        raise TelegramUnreachable(f"{type(e).__name__}: {mask(str(e))}") from None
+    try:
+        data = r.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or "ok" not in data:  # ответил не Telegram (релей, заглушка провайдера)
+        raise TelegramUnreachable(f"ответ {r.status_code} не от Telegram — проверьте адрес и секрет релея")
+    if not data["ok"]:
+        hint = " — проверьте BOT_TOKEN" if r.status_code in (401, 404) else ""
+        raise TelegramUnreachable(f"Telegram ответил {r.status_code} {mask(str(data.get('description', '')))}{hint}")
+    return data["result"]
+
+
+def _where() -> str:
+    """Куда ходим — без секретного пути релея (вывод могут скопировать в чат)."""
+    u = urlsplit(settings.telegram_api_base)
+    return f"{u.scheme}://{u.netloc}" + ("/…" if u.path.strip("/") else "")
+
+
+def check_telegram() -> bool:
+    try:
+        me = get_me()
+    except TelegramUnreachable as e:
+        print(f"❌ Не достучался до Telegram ({_where()}): {e}.\n{RELAY_HINT}")
+        return False
+    print(f"OK, бот @{me.get('username')} (Telegram через {_where()})")
+    return True
 
 
 def bot_link(code: str) -> str:
     username = None
-    if settings.bot_token:
-        try:
-            r = httpx.get(f"https://api.telegram.org/bot{settings.bot_token}/getMe", timeout=10)
-            username = r.json()["result"]["username"]
-        except Exception:
-            pass
+    try:
+        username = get_me()["username"]
+    except Exception:
+        pass
     if username:
         return f"https://t.me/{username}?start={code}"
     return f"откройте бота и отправьте: /start {code}"
@@ -67,21 +117,58 @@ async def demo():
             return print("Сначала: python -m app.manage init")
         if await s.scalar(select(func.count(Service.id)).where(Service.tenant_id == t.id)):
             return print("Услуги уже есть — демо не добавляю.")
-        svcs = [Service(tenant_id=t.id, name=n, price=p, duration_min=d, is_active=True)
-                for n, p, d in [("Мужская стрижка", 800, 60), ("Стрижка бороды", 500, 30),
-                                ("Стрижка + борода", 1200, 90), ("Детская стрижка", 600, 45)]]
-        masters = [Master(tenant_id=t.id, name=n, is_active=True) for n in ("Алим", "Тимур")]
-        s.add_all(svcs + masters)
-        await s.flush()
-        for m in masters:
-            for sv in svcs:
-                s.add(MasterService(master_id=m.id, service_id=sv.id))
-            for wd, a, b in DEFAULT_HOURS:
-                s.add(WorkingHours(master_id=m.id, weekday=wd, start_time=a, end_time=b))
-        t.address = t.address or "г. Нальчик, ул. Примерная, 1"
-        t.work_hours_text = t.work_hours_text or "Пн–Сб 10:00–20:00"
+        await _seed_demo(s, t)
         await s.commit()
         print("Демо-данные добавлены: 4 услуги, 2 мастера (Пн–Сб 10–20). Поменять — /admin в боте.")
+
+
+async def _seed_demo(s, t: Tenant) -> list[Master]:
+    svcs = [Service(tenant_id=t.id, name=n, price=p, duration_min=d, is_active=True)
+            for n, p, d in [("Мужская стрижка", 800, 60), ("Стрижка бороды", 500, 30),
+                            ("Стрижка + борода", 1200, 90), ("Детская стрижка", 600, 45)]]
+    masters = [Master(tenant_id=t.id, name=n, is_active=True) for n in ("Алим", "Тимур")]
+    s.add_all(svcs + masters)
+    await s.flush()
+    for m in masters:
+        for sv in svcs:
+            s.add(MasterService(master_id=m.id, service_id=sv.id))
+        for wd, a, b in DEFAULT_HOURS:
+            s.add(WorkingHours(master_id=m.id, weekday=wd, start_time=a, end_time=b))
+    t.address = t.address or "г. Нальчик, ул. Примерная, 1"
+    t.work_hours_text = t.work_hours_text or "Пн–Сб 10:00–20:00"
+    return masters
+
+
+async def reset_demo():
+    """Ночная чистка демо-бота: записи, клиенты, услуги и мастера → исходные демо-данные.
+    Настройки салона (название, адрес, админ, предоплата) не трогаем; мастера, привязанные к Telegram,
+    остаются привязанными (по имени), чтобы не рассылать приглашения заново."""
+    if not settings.demo_mode:
+        print("Отказ: reset-demo работает только при DEMO_MODE=1 в .env (защита от стирания боевого салона).")
+        raise SystemExit(1)
+    async with SessionLocal() as s:
+        t = await tenant(s)
+        if not t:
+            return print("Сначала: python -m app.manage init")
+        masters = (await s.scalars(select(Master).where(Master.tenant_id == t.id))).all()
+        links = {m.name: m.telegram_chat_id for m in masters if m.telegram_chat_id}
+        bookings = select(Booking.id).where(Booking.tenant_id == t.id)
+        mids = select(Master.id).where(Master.tenant_id == t.id)
+        n_b = await s.scalar(select(func.count()).select_from(bookings.subquery()))
+        n_c = await s.scalar(select(func.count(Client.id)).where(Client.tenant_id == t.id))
+        await s.execute(delete(Review).where(Review.booking_id.in_(bookings)))
+        await s.execute(delete(Payment).where(Payment.booking_id.in_(bookings)))
+        await s.execute(delete(Booking).where(Booking.tenant_id == t.id))
+        await s.execute(delete(Client).where(Client.tenant_id == t.id))
+        for model in (MasterTimeOff, WorkingHours, MasterService):
+            await s.execute(delete(model).where(model.master_id.in_(mids)))
+        await s.execute(delete(Master).where(Master.tenant_id == t.id))
+        await s.execute(delete(Service).where(Service.tenant_id == t.id))
+        for m in await _seed_demo(s, t):
+            m.telegram_chat_id = links.get(m.name)
+        await s.commit()
+        print(f"Демо сброшено: удалено записей {n_b}, клиентов {n_c}; заново 4 услуги и 2 мастера "
+              f"(привязано к Telegram: {sum(1 for n in links if n in ('Алим', 'Тимур'))}).")
 
 
 async def admin_link():
@@ -110,13 +197,15 @@ async def status():
 
 async def main(cmd: str):
     await upgrade_db()
-    await {"init": init, "demo": demo, "admin-link": admin_link, "status": status}[cmd]()
+    await {"init": init, "demo": demo, "admin-link": admin_link, "status": status, "reset-demo": reset_demo}[cmd]()
     await engine.dispose()
 
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    if cmd not in ("init", "demo", "admin-link", "status"):
+    if cmd == "check-telegram":  # база не нужна
+        sys.exit(0 if check_telegram() else 1)
+    if cmd not in ("init", "demo", "admin-link", "status", "reset-demo"):
         print(__doc__)
         sys.exit(1)
     asyncio.run(main(cmd))

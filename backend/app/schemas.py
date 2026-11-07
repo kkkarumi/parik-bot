@@ -2,6 +2,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .config import settings
+
 
 class ORM(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -17,6 +19,8 @@ class SalonOut(ORM):
     welcome_text: str | None = None
     timezone: str = "Europe/Moscow"
     prepay_amount: int = 0
+    # политика отмены (из .env), чтобы бот мог предупредить клиента заранее
+    cancel_before_min: int = Field(default_factory=lambda: settings.cancel_before_min)
 
 
 class SalonAdminOut(SalonOut):
@@ -128,6 +132,7 @@ class ClientOut(ORM):
     name: str | None = None
     phone: str | None = None
     is_blocked: bool = False
+    consent_at: datetime | None = None
 
 
 class ClientPatch(BaseModel):

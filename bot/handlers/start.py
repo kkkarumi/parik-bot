@@ -9,7 +9,8 @@ from ui import e, main_menu, show
 
 log = logging.getLogger(__name__)
 
-CLIENT_COMMANDS = [("start", "🏠 Главное меню")]
+CLIENT_COMMANDS = [("start", "🏠 Главное меню"), ("privacy", "🔒 Мои данные и согласие"),
+                   ("forget", "🗑 Удалить мои данные")]
 MASTER_COMMANDS = CLIENT_COMMANDS + [("schedule", "📋 Записи клиентов")]
 ADMIN_COMMANDS = MASTER_COMMANDS + [("admin", "⚙️ Админка")]
 
